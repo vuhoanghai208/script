@@ -38,6 +38,15 @@ local Savemod = require(Client.Save)
 local Functions = require(ReplicatedStorage.Library.Functions)
 local Items = require(ReplicatedStorage.Library.Items.Types)
 
+-- ID các map và icon
+local TRADING_PLAZA_ICON = "rbxassetid://15048276787" -- Official Trading Plaza icon
+local PLACE_IDS = {
+    MAIN_WORLD = 8737899170,
+    PLAZA_WORLD = 16498369169,
+    TRADING_PLAZA_1 = 15588442388,
+    TRADING_PLAZA_2 = 15502339080
+}
+
 -- Chống idle
 for _, v in pairs(getconnections(LocalPlayer.Idled)) do v:Disable() end
 LocalPlayer.Idled:Connect(function()
@@ -160,6 +169,88 @@ local function ConvertPrice(Price, Rap)
         end
     end
     return Price
+end
+
+-- Hàm kiểm tra vị trí hiện tại
+local function getCurrentLocation()
+    local currentPlaceId = game.PlaceId
+    
+    if currentPlaceId == PLACE_IDS.MAIN_WORLD then
+        return "MAIN_WORLD"
+    elseif currentPlaceId == PLACE_IDS.PLAZA_WORLD then
+        return "PLAZA_WORLD"
+    elseif currentPlaceId == PLACE_IDS.TRADING_PLAZA_1 or currentPlaceId == PLACE_IDS.TRADING_PLAZA_2 then
+        return "TRADING_PLAZA"
+    else
+        return "UNKNOWN_" .. tostring(currentPlaceId)
+    end
+end
+
+-- Hàm teleport đến Trading Plaza nâng cao
+local function teleportToTradingPlaza()
+    local currentLocation = getCurrentLocation()
+    print("Vị trí hiện tại: " .. currentLocation)
+    
+    if currentLocation == "TRADING_PLAZA" then
+        print("Đã ở Trading Plaza, không cần teleport")
+        return true
+    end
+    
+    print("Đang teleport đến Trading Plaza...")
+    
+    -- Phương pháp 1: Sử dụng Network.Invoke
+    local success1 = pcall(function()
+        Network.Invoke("Travel to Trading Plaza")
+        print("Đã gọi Travel to Trading Plaza")
+        task.wait(5)
+    end)
+    
+    -- Kiểm tra lại vị trí sau phương pháp 1
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Phương pháp 1 thành công!")
+        return true
+    end
+    
+    -- Phương pháp 2: Tìm và sử dụng cổng Trading Plaza
+    print("Phương pháp 1 thất bại, thử phương pháp 2...")
+    local success2 = pcall(function()
+        -- Tìm cổng Trading Plaza trong khu vực Castle
+        local ZonesUtil = require(ReplicatedStorage.Library.Util.ZonesUtil)
+        local castleFolder = ZonesUtil.GetInteractFolder and ZonesUtil.GetInteractFolder("Castle")
+        
+        if castleFolder then
+            local portal = castleFolder:FindFirstChild("TradingPlazaPortal")
+            if portal and portal:FindFirstChild("InteractHolder") then
+                -- Teleport đến vị trí cổng
+                local portalPos = portal.InteractHolder.Position
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(portalPos)
+                    task.wait(1)
+                    
+                    -- Tương tác với cổng
+                    Network.Fire("Teleporting to Trading Plaza!")
+                    Network.Invoke("Travel to Trading Plaza")
+                    task.wait(3)
+                end
+            end
+        end
+    end)
+    
+    -- Kiểm tra lại vị trí sau phương pháp 2
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Phương pháp 2 thành công!")
+        return true
+    end
+    
+    -- Phương pháp 3: Sử dụng TeleportService trực tiếp
+    print("Phương pháp 2 thất bại, thử phương pháp 3...")
+    local success3 = pcall(function()
+        TeleportService:Teleport(PLACE_IDS.TRADING_PLAZA_1)
+        task.wait(5)
+    end)
+    
+    print("Đã thử tất cả phương pháp teleport")
+    return (getCurrentLocation() == "TRADING_PLAZA")
 end
 
 -- Hàm chiếm gian hàng
@@ -448,21 +539,17 @@ local function createHugeListing(uuid, petData, rap)
     end
 end
 
--- Logic teleport và chiếm gian hàng
+-- Logic teleport và chiếm gian hàng (đã cải tiến)
 spawn(function()
     while task.wait(5) do
-        -- Kiểm tra xem đang ở Plaza hay Trading Plaza chưa
-        if game.PlaceId == 8737899170 or game.PlaceId == 16498369169 then
-            -- Kiểm tra số lượng pet Huge
-            if totalhuge >= 5 then
-                print("Có " .. totalhuge .. " pet Huge, teleport đến Trading Plaza")
-                TeleportService:Teleport(15588442388)
-            else
-                print("Chỉ có " .. totalhuge .. " pet Huge, teleport đến Trading Plaza")
-                Network.Invoke("Travel to Trading Plaza")
-                TeleportService:Teleport(15502339080)
-            end
-        elseif game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+        local currentLocation = getCurrentLocation()
+        print("Vị trí hiện tại: " .. currentLocation)
+        
+        -- Nếu không ở Trading Plaza, teleport đến đó
+        if currentLocation ~= "TRADING_PLAZA" then
+            print("Không ở Trading Plaza, đang teleport...")
+            teleportToTradingPlaza()
+        else
             -- Đợi nhân vật load
             if not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) then
                 task.wait(1)
@@ -470,9 +557,9 @@ spawn(function()
             end
             
             -- Chiếm gian hàng
-            if not occupyBooth() then
-                print("Đang thử chiếm gian hàng lại...")
-                task.wait(5)
+            if not currentBooth then
+                print("Đang thử chiếm gian hàng...")
+                occupyBooth()
             end
         end
     end
@@ -481,7 +568,15 @@ end)
 -- Gửi kim cương
 spawn(function()
     while task.wait(30) do
-        sendGems()
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        -- Chỉ gửi nếu đã cấu hình
+        if targetUser and targetUser ~= "" then
+            sendGems()
+        else
+            -- Thông báo một lần
+            print("Đã bỏ qua gửi kim cương do chưa cấu hình")
+            break -- Thoát khỏi vòng lặp nếu không cấu hình
+        end
     end
 end)
 
@@ -489,7 +584,7 @@ end)
 spawn(function()
     while true do
         task.wait(getgenv().Config["Time Remove"] * 60)
-        if game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+        if getCurrentLocation() == "TRADING_PLAZA" then
             removeAllListings()
         end
     end
@@ -502,7 +597,7 @@ spawn(function()
         
         -- Kiểm tra xem có đủ thời gian để hop server không
         print("Hopping server...")
-        if game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+        if getCurrentLocation() == "TRADING_PLAZA" then
             local servers = {}
             local cursor = ""
             local req = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100" .. cursor))
@@ -528,7 +623,7 @@ spawn(function()
     while true do
         task.wait(10)
         
-        if game.PlaceId ~= 15588442388 and game.PlaceId ~= 15502339080 then
+        if getCurrentLocation() ~= "TRADING_PLAZA" then
             continue
         end
         
@@ -607,8 +702,21 @@ spawn(function()
             end
         end
         
-        -- Sắp xếp theo RAP giảm dần
-        table.sort(BoothQueue, function(a, b) return a.Rap > b.Rap end)
+        -- Đối với pet Huge, sắp xếp theo RAP tăng dần (thấp đến cao) để bán nhanh hơn
+        -- Đối với các vật phẩm thường, vẫn giữ thứ tự RAP giảm dần
+        table.sort(BoothQueue, function(a, b)
+            -- Nếu cả hai cùng là Huge hoặc cùng không phải Huge, sắp xếp theo yêu cầu
+            if (a.Type == "Huge" and b.Type == "Huge") then
+                -- Sắp xếp Huge theo RAP tăng dần (thấp trước)
+                return a.Rap < b.Rap
+            elseif (a.Type ~= "Huge" and b.Type ~= "Huge") then
+                -- Sắp xếp vật phẩm thường theo RAP giảm dần (cao trước)
+                return a.Rap > b.Rap
+            else
+                -- Ưu tiên pet Huge trước vật phẩm thường
+                return a.Type == "Huge"
+            end
+        end)
         
         -- Tính toán số lượng slot còn trống
         local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
@@ -644,4 +752,58 @@ spawn(function()
     end
 end)
 
-print("Script đã khởi động thành công")
+-- Thêm chức năng tính toán thời gian listing
+local listingStartTime = os.time()
+
+local function getElapsedTimeString()
+    local elapsedSeconds = os.time() - listingStartTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+-- Thêm biến đếm số lượng Huge đã bán
+local hugesSold = 0
+local normalItemsSold = 0
+
+-- Cập nhật hàm createHugeListing để đếm số Huge đã bán
+local oldCreateHugeListing = createHugeListing
+createHugeListing = function(uuid, petData, rap)
+    local result = oldCreateHugeListing(uuid, petData, rap)
+    if result then
+        hugesSold = hugesSold + 1
+    end
+    return result
+end
+
+-- Cập nhật hàm createItemListing để đếm số vật phẩm thường đã bán
+local oldCreateItemListing = createItemListing
+createItemListing = function(uuid, itemId, itemClass, amount, rap)
+    local result = oldCreateItemListing(uuid, itemId, itemClass, amount, rap)
+    if result then
+        normalItemsSold = normalItemsSold + 1
+    end
+    return result
+end
+
+-- In thông tin vị trí khởi động
+print("Vị trí khi khởi động: " .. getCurrentLocation())
+print("Script đã khởi động thành công với icon Trading Plaza: " .. TRADING_PLAZA_ICON)
+print("Đã cấu hình ưu tiên bán pet Huge theo RAP từ thấp đến cao")
+
+-- Thêm thông tin thống kê định kỳ
+-- Find this section near the end of the script where we added the statistics display
+spawn(function()
+    while true do
+        task.wait(60) -- Mỗi phút hiển thị thống kê một lần
+        
+        print("===== THỐNG KÊ SCRIPT =====")
+        print("Thời gian chạy: " .. getElapsedTimeString())
+        print("Tổng số pet Huge trong kho: " .. totalhuge)
+        print("Số pet Huge đã listing: " .. hugesSold)
+        print("Số vật phẩm thường đã listing: " .. normalItemsSold)
+        print("Slot sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+        print("============================")
+    end
+end) -- Add this "end" if it's missing
