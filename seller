@@ -1,0 +1,647 @@
+-- Khai báo cấu hình
+getgenv().Config = {
+    ["Account Hold Gem"] = "", -- Thay bằng tên tài khoản thực tế
+    ["Gem"] = "50b",
+    ["Time Remove"] = 5, -- phút
+    ["Link Webhook"] = "",
+    ["Hop sever"] = 15, -- phút
+}
+
+getgenv().hugemode = {
+    ["All Huges Normal"] = { strategy = "+2%", sell = true },
+    ["All Huges Golden"] = { strategy = "-2%", sell = true },
+    ["All Huges Rainbow"] = { strategy = "+999%", sell = true },
+    ["All Huges Shiny"] = { strategy = "-1%", sell = true }
+}
+
+getgenv().item = {
+    ["Hype Egg 2"] = 95,
+}
+
+-- Đợi game tải hoàn tất
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- Khai báo dịch vụ và thư viện
+local VirtualUser = game:GetService("VirtualUser")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Library = ReplicatedStorage.Library
+local Client = Library.Client
+local RAPCmds = require(Client.RAPCmds)
+local Network = require(Client.Network)
+local Savemod = require(Client.Save)
+local Functions = require(ReplicatedStorage.Library.Functions)
+local Items = require(ReplicatedStorage.Library.Items.Types)
+
+-- Chống idle
+for _, v in pairs(getconnections(LocalPlayer.Idled)) do v:Disable() end
+LocalPlayer.Idled:Connect(function()
+    VirtualUser:ClickButton2(Vector2.new(math.random(0, 1000), math.random(0, 1000)))
+end)
+
+-- Hook để chống server closing hoặc idle tracking
+local old
+old = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() then
+        local Name = tostring(self)
+        if table.find({"Server Closing", "Idle Tracking: Update Timer", "Move Server"}, Name) then
+            return nil
+        end
+    end
+    return old(self, ...)
+end)
+Network.Fire("Idle Tracking: Stop Timer")
+
+-- Đợi giao diện và leaderstats sẵn sàng
+local function waitForGameReady()
+    local success, result = pcall(function()
+        -- Đợi UI và leaderstats
+        while not (game:IsLoaded() and
+               LocalPlayer:FindFirstChild("PlayerGui") and
+               not LocalPlayer.PlayerGui:FindFirstChild("__INTRO") and
+               LocalPlayer.PlayerGui:FindFirstChild("MainLeft") and
+               LocalPlayer.PlayerGui.MainLeft.Left.Currency.Diamonds.Diamonds.Visible == true and
+               not LocalPlayer:FindFirstChild("GUIFX Holder")) do
+            task.wait(0.5)
+        end
+        
+        -- Đợi leaderstats
+        local timeout = 30 -- giây
+        local startTime = tick()
+        while not (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")) do
+            if tick() - startTime > timeout then
+                warn("Timeout chờ leaderstats['💎 Diamonds']")
+                return false
+            end
+            task.wait(0.5)
+        end
+        
+        return true
+    end)
+    
+    if not success or not result then
+        warn("Lỗi khi đợi game sẵn sàng: " .. tostring(result))
+        return false
+    end
+    
+    return true
+end
+
+-- Đợi game sẵn sàng
+if not waitForGameReady() then
+    warn("Game không sẵn sàng, kết thúc script")
+    return
+end
+
+print("Game đã sẵn sàng, bắt đầu chạy script")
+
+-- Biến global để theo dõi
+local totalhuge = 0
+local listedItems = {}
+local currentBooth = nil
+local usedSlots = 0
+local MAX_BOOTH_SLOTS = 25
+
+-- Đếm số pet "Huge"
+local function countHugePets()
+    local count = 0
+    for _, v in pairs(Savemod.Get().Inventory.Pet) do
+        if string.find(v.id, "Huge") then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Cập nhật đếm Huge định kỳ
+spawn(function()
+    while task.wait(10) do
+        totalhuge = countHugePets()
+    end
+end)
+
+-- Hàm tính RAP
+local function GetRap(Class, ItemTable)
+    local success, result = pcall(function()
+        local Item = require(Library.Items[Class .. "Item"])(ItemTable.id)
+        if ItemTable.sh then Item:SetShiny(true) end
+        if ItemTable.pt == 1 then Item:SetGolden() end
+        if ItemTable.pt == 2 then Item:SetRainbow() end
+        if ItemTable.tn then Item:SetTier(ItemTable.tn) end
+        return RAPCmds.Get(Item) or 0
+    end)
+    
+    if not success then
+        warn("Lỗi khi tính RAP: " .. tostring(result))
+        return 0
+    end
+    
+    return result
+end
+
+-- Hàm chuyển đổi giá
+local function ConvertPrice(Price, Rap)
+    if type(Price) == "string" then
+        local Percentage = tonumber(Price:match("^([%+%-]?%d+)%%"))
+        if Percentage then
+            if Price:sub(1, 1) == "+" then
+                return (1 + (Percentage / 100)) * Rap
+            elseif Price:sub(1, 1) == "-" then
+                return (1 - (Percentage / 100)) * Rap
+            else
+                return (Percentage / 100) * Rap
+            end
+        end
+    end
+    return Price
+end
+
+-- Hàm chiếm gian hàng
+local function occupyBooth()
+    local success, result = pcall(function()
+        -- Kiểm tra xem đã có gian hàng chưa
+        local HaveBooth = false
+        for _, Booth in ipairs(workspace.__THINGS.Booths:GetChildren()) do
+            if Booth:IsA("Model") and Booth:GetAttribute("Owner") == LocalPlayer.UserId then
+                HaveBooth = true
+                currentBooth = Booth
+                LocalPlayer.Character.HumanoidRootPart.CFrame = Booth.Table.CFrame * CFrame.new(5, 0, 0)
+                print("Đã tìm thấy gian hàng của bạn!")
+                return true
+            end
+        end
+
+        if not HaveBooth then
+            -- Tìm gian hàng gần nhất để chiếm
+            local pos, id
+            local distance = math.huge
+            local playerPos = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart.Position
+            if not playerPos then return false end
+
+            for _, v in pairs(workspace.TradingPlaza.BoothSpawns:GetChildren()) do
+                if v and v.WorldPivot then
+                    local boothPosition = v.WorldPivot.Position
+                    local currentDistance = (boothPosition - playerPos).Magnitude
+                    local boothId = v:GetAttribute("ID")
+                    if boothId and currentDistance < distance then
+                        distance = currentDistance
+                        pos = boothPosition
+                        id = boothId
+                    end
+                end
+            end
+
+            if pos and id then
+                LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(-5, 5, 0))
+                task.wait(0.5)
+                local claimSuccess = pcall(function()
+                    Network.Invoke("Booths_ClaimBooth", tostring(id))
+                end)
+                if claimSuccess then
+                    print("Đã chiếm gian hàng ID: " .. id)
+                    return true
+                else
+                    warn("Không thể chiếm gian hàng")
+                    return false
+                end
+            else
+                warn("Không tìm thấy gian hàng gần!")
+                return false
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Lỗi khi chiếm gian hàng: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Hàm gửi kim cương
+local function sendGems()
+    local success, result = pcall(function()
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        if targetUser == "" then
+            warn("Chưa cấu hình tài khoản nhận kim cương")
+            return false
+        end
+        
+        local diamondThreshold = Functions.ParseNumberSmart(getgenv().Config["Gem"])
+        local currentDiamonds = LocalPlayer.leaderstats["💎 Diamonds"].Value
+        
+        if currentDiamonds >= diamondThreshold then
+            -- Tìm ID của kim cương
+            for i, v in pairs(Savemod.Get().Inventory.Currency) do
+                if v.id == "Diamonds" then
+                    -- Giữ lại 1 tỷ kim cương
+                    local amountToSend = currentDiamonds - Functions.ParseNumberSmart("1b")
+                    
+                    -- Gửi kim cương
+                    local args = {
+                        [1] = targetUser,
+                        [2] = "Tự động gửi từ script",
+                        [3] = "Currency",
+                        [4] = tostring(i),
+                        [5] = amountToSend
+                    }
+                    
+                    ReplicatedStorage.Network["Mailbox: Send"]:InvokeServer(unpack(args))
+                    print("Đã gửi " .. tostring(amountToSend) .. " kim cương đến " .. targetUser)
+                    return true
+                end
+            end
+            warn("Không tìm thấy ID kim cương")
+        end
+        
+        return false
+    end)
+    
+    if not success then
+        warn("Lỗi khi gửi kim cương: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Hàm đếm số slot đã sử dụng trong gian hàng
+local function countUsedBoothSlots()
+    local count = 0
+    local success, result = pcall(function()
+        if not currentBooth then return 0 end
+        
+        for _, child in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+            if child:IsA("Frame") then
+                count = count + 1
+            end
+        end
+        
+        return count
+    end)
+    
+    if not success then
+        warn("Lỗi khi đếm slot gian hàng: " .. tostring(result))
+        return 0
+    end
+    
+    return count
+end
+
+-- Hàm xóa tất cả listing
+local function removeAllListings()
+    local success, result = pcall(function()
+        if not currentBooth then return false end
+        
+        for _, v1 in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+            if v1:IsA("Frame") then
+                ReplicatedStorage.Network["Booths_RemoveListing"]:InvokeServer(v1.Name)
+                task.wait(0.2) -- Tránh ratelimit
+            end
+        end
+        
+        -- Reset danh sách đã list và số slot đã sử dụng
+        listedItems = {}
+        usedSlots = 0
+        print("Đã xóa tất cả listing")
+        return true
+    end)
+    
+    if not success then
+        warn("Lỗi khi xóa listing: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Hàm xác định loại pet Huge
+local function getHugeType(petId, petData)
+    if petData.pt == 1 or string.find(petId, "Golden") then
+        return "All Huges Golden"
+    elseif petData.pt == 2 or string.find(petId, "Rainbow") then
+        return "All Huges Rainbow"
+    elseif petData.sh or string.find(petId, "Shiny") then
+        return "All Huges Shiny"
+    else
+        return "All Huges Normal"
+    end
+end
+
+-- Hàm tạo listing cho vật phẩm
+local function createItemListing(uuid, itemId, itemClass, amount, rap)
+    -- Kiểm tra xem đã list item này chưa
+    if listedItems[uuid] then return false end
+    
+    -- Kiểm tra xem còn slot trống không
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        return false
+    end
+    
+    local price = 0
+    -- Kiểm tra xem có cấu hình cho item này không
+    if getgenv().item[itemId] then
+        price = math.floor(rap * (getgenv().item[itemId] / 100))
+    else
+        return false
+    end
+    
+    if price <= 0 then
+        warn("Giá không hợp lệ cho " .. itemId)
+        return false
+    end
+    
+    local listingAmount = math.min(amount, 15000, math.floor(25e9 / price))
+    if listingAmount <= 0 then
+        warn("Số lượng không hợp lệ cho " .. itemId)
+        return false
+    end
+    
+    local args = {
+        [1] = tostring(uuid),
+        [2] = price,
+        [3] = listingAmount
+    }
+    
+    local success, err = pcall(function()
+        return Network.Invoke("Booths_CreateListing", unpack(args))
+    end)
+    
+    if success then
+        listedItems[uuid] = true
+        usedSlots = usedSlots + 1
+        print("Đã tạo listing cho vật phẩm: " .. itemId .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        return true
+    else
+        warn("Lỗi khi tạo listing cho vật phẩm: " .. tostring(err))
+        return false
+    end
+end
+
+-- Hàm tạo listing cho pet Huge
+local function createHugeListing(uuid, petData, rap)
+    -- Kiểm tra xem đã list pet này chưa
+    if listedItems[uuid] then return false end
+    
+    -- Kiểm tra xem còn slot trống không
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        return false
+    end
+    
+    local typeString = getHugeType(petData.id, petData)
+    local hugeConfig = getgenv().hugemode[typeString]
+    
+    -- Kiểm tra xem có cần bán không
+    if hugeConfig.sell == false then
+        return false
+    end
+    
+    -- Tính giá dựa trên chiến lược
+    local adjustment = hugeConfig.strategy or ""
+    local multiplier = 1
+    
+    if adjustment ~= "" then
+        local sign = adjustment:sub(1, 1)
+        local percentStr = adjustment:sub(2, -2)
+        local percent = tonumber(percentStr)
+        
+        if sign == "+" then
+            multiplier = 1 + percent / 100
+        elseif sign == "-" then
+            multiplier = 1 - percent / 100
+        end
+    end
+    
+    local price = math.floor(rap * multiplier)
+    if price <= 0 then
+        warn("Giá không hợp lệ cho " .. petData.id)
+        return false
+    end
+    
+    local maxAmount = math.min(petData._am or 1, 15000, math.floor(25e9 / price))
+    if maxAmount <= 0 then
+        warn("Số lượng không hợp lệ cho " .. petData.id)
+        return false
+    end
+    
+    local success, err = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(price), maxAmount)
+    end)
+    
+    if success then
+        listedItems[uuid] = true
+        usedSlots = usedSlots + 1
+        print("Đã tạo listing cho pet Huge: " .. petData.id .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        return true
+    else
+        warn("Lỗi khi tạo listing cho pet Huge: " .. tostring(err))
+        return false
+    end
+end
+
+-- Logic teleport và chiếm gian hàng
+spawn(function()
+    while task.wait(5) do
+        -- Kiểm tra xem đang ở Plaza hay Trading Plaza chưa
+        if game.PlaceId == 8737899170 or game.PlaceId == 16498369169 then
+            -- Kiểm tra số lượng pet Huge
+            if totalhuge >= 5 then
+                print("Có " .. totalhuge .. " pet Huge, teleport đến Trading Plaza")
+                TeleportService:Teleport(15588442388)
+            else
+                print("Chỉ có " .. totalhuge .. " pet Huge, teleport đến Trading Plaza")
+                Network.Invoke("Travel to Trading Plaza")
+                TeleportService:Teleport(15502339080)
+            end
+        elseif game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+            -- Đợi nhân vật load
+            if not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+                task.wait(1)
+                continue
+            end
+            
+            -- Chiếm gian hàng
+            if not occupyBooth() then
+                print("Đang thử chiếm gian hàng lại...")
+                task.wait(5)
+            end
+        end
+    end
+end)
+
+-- Gửi kim cương
+spawn(function()
+    while task.wait(30) do
+        sendGems()
+    end
+end)
+
+-- Xóa listing định kỳ
+spawn(function()
+    while true do
+        task.wait(getgenv().Config["Time Remove"] * 60)
+        if game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+            removeAllListings()
+        end
+    end
+end)
+
+-- Server hopping
+spawn(function()
+    while true do
+        task.wait(getgenv().Config["Hop sever"] * 60)
+        
+        -- Kiểm tra xem có đủ thời gian để hop server không
+        print("Hopping server...")
+        if game.PlaceId == 15588442388 or game.PlaceId == 15502339080 then
+            local servers = {}
+            local cursor = ""
+            local req = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100" .. cursor))
+            
+            for _, server in ipairs(req.data) do
+                if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                    table.insert(servers, server.id)
+                end
+            end
+            
+            if #servers > 0 then
+                local randomServer = servers[math.random(1, #servers)]
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, randomServer)
+            else
+                print("Không tìm thấy server để hop")
+            end
+        end
+    end
+end)
+
+-- Main loop - Tạo listings
+spawn(function()
+    while true do
+        task.wait(10)
+        
+        if game.PlaceId ~= 15588442388 and game.PlaceId ~= 15502339080 then
+            continue
+        end
+        
+        -- Kiểm tra xem có gian hàng không
+        if not currentBooth then
+            occupyBooth()
+            if not currentBooth then
+                print("Không tìm thấy gian hàng, đang thử lại...")
+                continue
+            end
+        end
+        
+        -- Cập nhật số slot đã sử dụng
+        usedSlots = countUsedBoothSlots()
+        print("Hiện tại đang sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        
+        -- Kiểm tra xem đã đầy slot chưa
+        if usedSlots >= MAX_BOOTH_SLOTS then
+            print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng, chờ đến lần reset")
+            task.wait(60) -- Đợi 1 phút trước khi kiểm tra lại
+            continue
+        end
+        
+        -- Tạo danh sách vật phẩm để list
+        local BoothQueue = {}
+        
+        -- Thêm vật phẩm thường vào hàng đợi
+        for Class, Items in pairs(Savemod.Get().Inventory) do
+            if Class == "Pet" then continue end -- Xử lý pet riêng
+            
+            for ItemId, ItemData in pairs(Items) do
+                local amount = ItemData._am or 1
+                if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
+                    local rap = 0
+                    pcall(function()
+                        local itemObject = require(Library.Items[Class .. "Item"])(ItemData.id)
+                        rap = itemObject:GetRAP() or 0
+                    end)
+                    
+                    if rap > 0 then
+                        table.insert(BoothQueue, {
+                            UUID = ItemId,
+                            Item = ItemData,
+                            Class = Class,
+                            Rap = rap,
+                            Type = "Normal"
+                        })
+                    end
+                end
+            end
+        end
+        
+        -- Thêm pet "Huge" vào hàng đợi
+        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+            if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+                local rap = 0
+                pcall(function()
+                    local petItem = require(Library.Items.PetItem)(PetData.id)
+                    if PetData.sh then petItem:SetShiny(true) end
+                    if PetData.pt == 1 then petItem:SetGolden() end
+                    if PetData.pt == 2 then petItem:SetRainbow() end
+                    rap = petItem:GetRAP() or 0
+                end)
+                
+                if rap > 0 then
+                    local typeString = getHugeType(PetData.id, PetData)
+                    table.insert(BoothQueue, {
+                        UUID = PetId,
+                        Item = PetData,
+                        Class = "Pet",
+                        Rap = rap,
+                        Type = "Huge",
+                        HugeType = typeString
+                    })
+                end
+            end
+        end
+        
+        -- Sắp xếp theo RAP giảm dần
+        table.sort(BoothQueue, function(a, b) return a.Rap > b.Rap end)
+        
+        -- Tính toán số lượng slot còn trống
+        local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
+        print("Có thể thêm tối đa " .. remainingSlots .. " vật phẩm vào gian hàng")
+        
+        -- Giới hạn số lượng vật phẩm sẽ được thêm vào
+        local itemsToAdd = math.min(remainingSlots, #BoothQueue)
+        if itemsToAdd == 0 then
+            print("Không có vật phẩm mới để thêm vào gian hàng")
+            task.wait(60) -- Đợi 1 phút trước khi kiểm tra lại
+            continue
+        end
+        
+        print("Đang thêm " .. itemsToAdd .. " vật phẩm vào gian hàng...")
+        
+        -- Tạo listing theo thứ tự ưu tiên, chỉ cho đến khi đầy slot
+        for i = 1, itemsToAdd do
+            local ItemInfo = BoothQueue[i]
+            
+            -- Dừng nếu đã đầy slot
+            if usedSlots >= MAX_BOOTH_SLOTS then
+                print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+                break
+            end
+            
+            if ItemInfo.Type == "Huge" then
+                createHugeListing(ItemInfo.UUID, ItemInfo.Item, ItemInfo.Rap)
+            else
+                createItemListing(ItemInfo.UUID, ItemInfo.Item.id, ItemInfo.Class, ItemInfo.Item._am or 1, ItemInfo.Rap)
+            end
+            task.wait(1) -- Đợi giữa các listing để tránh rate limit
+        end
+    end
+end)
+
+print("Script đã khởi động thành công")
