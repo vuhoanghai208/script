@@ -1,19 +1,46 @@
--- Khai báo cấu hình
+-- Cấu hình nâng cao
 getgenv().Config = {
     ["Account Hold Gem"] = "", -- Thay bằng tên tài khoản thực tế
     ["Gem"] = "50b",
     ["Time Remove"] = 5, -- phút
     ["Link Webhook"] = "",
     ["Hop sever"] = 15, -- phút
+    
+    -- Tùy chỉnh nâng cao
+    ["Minimum Price"] = 5000000, -- Giá tối thiểu (5M)
+    ["Maximum Price"] = 100000000000, -- Giá tối đa (100B)
+    ["Prioritize Low RAP"] = true, -- Ưu tiên bán pet RAP thấp trước
+    ["Debug Mode"] = true, -- Hiển thị debug thông tin
+    ["Randomize Price"] = true, -- Thêm độ ngẫu nhiên vào giá
+    ["Random Range"] = 0.5 -- Phần trăm ngẫu nhiên (+/- 0.5%)
 }
 
+-- Cấu hình chiến lược bán từng loại pet
 getgenv().hugemode = {
-    ["All Huges Normal"] = { strategy = "+2%", sell = true },
-    ["All Huges Golden"] = { strategy = "-2%", sell = true },
-    ["All Huges Rainbow"] = { strategy = "+999%", sell = true },
-    ["All Huges Shiny"] = { strategy = "-1%", sell = true }
+    -- Có thể dùng số âm (-5) hoặc chuỗi ("-5%") cho giảm giá
+    -- Có thể dùng số dương (10) hoặc chuỗi ("+10%") cho tăng giá
+    ["All Huges Normal"] = { strategy = "-2%", sell = true, min_price = 10000000, max_price = 1000000000 },
+    ["All Huges Golden"] = { strategy = "-2%", sell = true, min_price = 20000000, max_price = 2000000000 },
+    ["All Huges Rainbow"] = { strategy = "-4%", sell = true, min_price = 50000000, max_price = 5000000000 },
+    ["All Huges Shiny"] = { strategy = "-6%", sell = true, min_price = 100000000, max_price = 10000000000 }
 }
 
+-- Chặn bán các pet Huge cụ thể (thêm tên pet vào đây)
+getgenv().hugeBlacklist = {
+    -- Ví dụ: "Huge Hacker Cat" -- Không bán Huge Hacker Cat
+}
+
+-- Danh sách pet Huge được ưu tiên bán trước (thêm tên pet vào đây)
+getgenv().hugePriority = {
+    -- Ví dụ: "Huge Miniguin" -- Bán Huge Miniguin trước tiên
+}
+
+-- Cấu hình tùy chỉnh cho từng pet cụ thể (ghi đè cấu hình chung)
+getgenv().customPetPricing = {
+    -- Ví dụ: ["Huge Chicken"] = { strategy = "+5%", min_price = 300000000 }
+}
+
+-- Cấu hình bán vật phẩm (không phải pet)
 getgenv().item = {
     ["Hype Egg 2"] = 95,
 }
@@ -47,6 +74,23 @@ local PLACE_IDS = {
     TRADING_PLAZA_2 = 15502339080
 }
 
+-- Hàm debug giá để xác định vấn đề
+local function debugPrice(petId, originalRap, calculatedPrice, strategy, finalPrice)
+    if not getgenv().Config["Debug Mode"] then return end
+    
+    print("===== DEBUG PRICE CALCULATION =====")
+    print("Pet ID: " .. petId)
+    print("Original RAP: " .. originalRap)
+    print("Strategy: " .. strategy)
+    print("Calculated Price: " .. calculatedPrice)
+    if finalPrice ~= calculatedPrice then
+        print("Final Price (after min/max): " .. finalPrice)
+    end
+    print("Discount Amount: " .. (originalRap - finalPrice))
+    print("Discount Percentage: " .. string.format("%.2f%%", 100 * (1 - finalPrice/originalRap)))
+    print("==================================")
+end
+
 -- Chống idle
 for _, v in pairs(getconnections(LocalPlayer.Idled)) do v:Disable() end
 LocalPlayer.Idled:Connect(function()
@@ -66,6 +110,21 @@ old = hookmetamethod(game, "__namecall", function(self, ...)
     return old(self, ...)
 end)
 Network.Fire("Idle Tracking: Stop Timer")
+
+-- Thêm chức năng tính toán thời gian listing
+local listingStartTime = os.time()
+
+local function getElapsedTimeString()
+    local elapsedSeconds = os.time() - listingStartTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+-- Thêm biến đếm số lượng Huge đã bán
+local hugesSold = 0
+local normalItemsSold = 0
 
 -- Đợi giao diện và leaderstats sẵn sàng
 local function waitForGameReady()
@@ -134,42 +193,6 @@ spawn(function()
         totalhuge = countHugePets()
     end
 end)
-
--- Hàm tính RAP
-local function GetRap(Class, ItemTable)
-    local success, result = pcall(function()
-        local Item = require(Library.Items[Class .. "Item"])(ItemTable.id)
-        if ItemTable.sh then Item:SetShiny(true) end
-        if ItemTable.pt == 1 then Item:SetGolden() end
-        if ItemTable.pt == 2 then Item:SetRainbow() end
-        if ItemTable.tn then Item:SetTier(ItemTable.tn) end
-        return RAPCmds.Get(Item) or 0
-    end)
-    
-    if not success then
-        warn("Lỗi khi tính RAP: " .. tostring(result))
-        return 0
-    end
-    
-    return result
-end
-
--- Hàm chuyển đổi giá
-local function ConvertPrice(Price, Rap)
-    if type(Price) == "string" then
-        local Percentage = tonumber(Price:match("^([%+%-]?%d+)%%"))
-        if Percentage then
-            if Price:sub(1, 1) == "+" then
-                return (1 + (Percentage / 100)) * Rap
-            elseif Price:sub(1, 1) == "-" then
-                return (1 - (Percentage / 100)) * Rap
-            else
-                return (Percentage / 100) * Rap
-            end
-        end
-    end
-    return Price
-end
 
 -- Hàm kiểm tra vị trí hiện tại
 local function getCurrentLocation()
@@ -251,6 +274,25 @@ local function teleportToTradingPlaza()
     
     print("Đã thử tất cả phương pháp teleport")
     return (getCurrentLocation() == "TRADING_PLAZA")
+end
+
+-- Hàm tính RAP
+local function GetRap(Class, ItemTable)
+    local success, result = pcall(function()
+        local Item = require(Library.Items[Class .. "Item"])(ItemTable.id)
+        if ItemTable.sh then Item:SetShiny(true) end
+        if ItemTable.pt == 1 then Item:SetGolden() end
+        if ItemTable.pt == 2 then Item:SetRainbow() end
+        if ItemTable.tn then Item:SetTier(ItemTable.tn) end
+        return RAPCmds.Get(Item) or 0
+    end)
+    
+    if not success then
+        warn("Lỗi khi tính RAP: " .. tostring(result))
+        return 0
+    end
+    
+    return result
 end
 
 -- Hàm chiếm gian hàng
@@ -426,6 +468,165 @@ local function getHugeType(petId, petData)
     end
 end
 
+-- Hàm tính giá dựa trên chiến lược
+local function calculatePrice(rap, strategy, petId)
+    local multiplier = 1
+    local strategyDescription = strategy
+    
+    -- Xử lý chiến lược số (không có dấu %)
+    if type(strategy) == "number" then
+        if strategy < 0 then
+            -- Số âm = giảm giá
+            multiplier = 1 + (strategy / 100)
+            strategyDescription = tostring(strategy) .. "%"
+        else
+            -- Số dương = tăng giá
+            multiplier = 1 + (strategy / 100)
+            strategyDescription = "+" .. tostring(strategy) .. "%"
+        end
+    -- Xử lý chiến lược chuỗi (có dấu %)
+    elseif type(strategy) == "string" then
+        if strategy ~= "market" and strategy ~= "auto" then
+            local sign = strategy:sub(1, 1)
+            local percentStr = strategy:match("([%d%.]+)")
+            local percent = tonumber(percentStr)
+            
+            if percent then
+                if sign == "+" then
+                    multiplier = 1 + (percent / 100)
+                elseif sign == "-" then
+                    multiplier = 1 - (percent / 100)
+                else
+                    -- Nếu không có dấu +/-, coi như là phần trăm trực tiếp của RAP
+                    if tonumber(strategy:match("^[%d%.]+")) then
+                        multiplier = tonumber(strategy:match("^[%d%.]+")) / 100
+                    end
+                end
+            end
+        elseif strategy == "market" then
+            -- Giữ giá RAP hiện tại
+            multiplier = 1
+        elseif strategy == "auto" then
+            -- Tự động điều chỉnh giá dựa trên số lượng slot đã dùng
+            local usagePercent = usedSlots / MAX_BOOTH_SLOTS
+            
+            -- Nếu đã dùng nhiều slot, giảm giá để bán nhanh hơn
+            if usagePercent > 0.8 then
+                multiplier = 0.9 -- Giảm 10%
+            elseif usagePercent > 0.5 then
+                multiplier = 0.95 -- Giảm 5%
+            else
+                multiplier = 1 -- Giữ nguyên giá
+            end
+        end
+    end
+    
+    -- Tính giá ban đầu
+    local price = math.floor(rap * multiplier)
+    
+    -- Thêm độ ngẫu nhiên nếu được bật
+    if getgenv().Config["Randomize Price"] then
+        local randomPercent = (1 + (math.random(-100, 100) / 100 * getgenv().Config["Random Range"] / 100))
+        price = math.floor(price * randomPercent)
+    end
+    
+    return price, strategyDescription
+end
+
+-- Hàm tạo listing cho pet Huge
+local function createHugeListing(uuid, petData, rap)
+    -- Kiểm tra xem đã list pet này chưa
+    if listedItems[uuid] then return false end
+    
+    -- Kiểm tra xem còn slot trống không
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        return false
+    end
+    
+    -- Kiểm tra blacklist
+    for _, blacklistedPet in ipairs(getgenv().hugeBlacklist or {}) do
+        if string.find(petData.id, blacklistedPet) then
+            if getgenv().Config["Debug Mode"] then
+                print("Bỏ qua pet: " .. petData.id .. " (trong blacklist)")
+            end
+            return false
+        end
+    end
+    
+    -- Lấy cấu hình pet
+    local typeString = getHugeType(petData.id, petData)
+    local hugeConfig = getgenv().hugemode[typeString]
+    
+    -- Kiểm tra cấu hình tùy chỉnh cho pet cụ thể
+    for specificPet, customConfig in pairs(getgenv().customPetPricing or {}) do
+        if string.find(petData.id, specificPet) then
+            -- Ghi đè chiến lược nếu có
+            if customConfig.strategy then
+                hugeConfig.strategy = customConfig.strategy
+            end
+            -- Ghi đè giá tối thiểu nếu có
+            if customConfig.min_price then
+                hugeConfig.min_price = customConfig.min_price
+            end
+            -- Ghi đè giá tối đa nếu có
+            if customConfig.max_price then
+                hugeConfig.max_price = customConfig.max_price
+            end
+            
+            if getgenv().Config["Debug Mode"] then
+                print("Áp dụng cấu hình tùy chỉnh cho pet: " .. petData.id)
+            end
+            break
+        end
+    end
+    
+    -- Kiểm tra xem có cần bán không
+    if hugeConfig.sell == false then
+        return false
+    end
+    
+    -- Tính giá dựa trên chiến lược
+    local calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy, petData.id)
+    
+    -- Áp dụng giới hạn giá
+    local minPrice = hugeConfig.min_price or getgenv().Config["Minimum Price"] or 0
+    local maxPrice = hugeConfig.max_price or getgenv().Config["Maximum Price"] or math.huge
+    
+    local finalPrice = math.max(minPrice, math.min(maxPrice, calculatedPrice))
+    
+    -- Debug thông tin tính giá
+    debugPrice(petData.id, rap, calculatedPrice, strategyDescription, finalPrice)
+    
+    if finalPrice <= 0 then
+        warn("Giá không hợp lệ cho " .. petData.id)
+        return false
+    end
+    
+    local maxAmount = math.min(petData._am or 1, 15000, math.floor(25e9 / finalPrice))
+    if maxAmount <= 0 then
+        warn("Số lượng không hợp lệ cho " .. petData.id)
+        return false
+    end
+    
+    print("Đang thử bán " .. petData.id .. " với giá " .. finalPrice .. " (" .. strategyDescription .. " của RAP " .. rap .. ")")
+    
+    local success, err = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(finalPrice), maxAmount)
+    end)
+    
+    if success then
+        listedItems[uuid] = true
+        usedSlots = usedSlots + 1
+        hugesSold = hugesSold + 1
+        print("✅ ĐÃ BÁN PET HUGE THÀNH CÔNG: " .. petData.id .. " với giá " .. finalPrice .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        return true
+    else
+        warn("❌ KHÔNG THỂ BÁN PET: " .. tostring(err))
+        return false
+    end
+end
+
 -- Hàm tạo listing cho vật phẩm
 local function createItemListing(uuid, itemId, itemClass, amount, rap)
     -- Kiểm tra xem đã list item này chưa
@@ -469,6 +670,7 @@ local function createItemListing(uuid, itemId, itemClass, amount, rap)
     if success then
         listedItems[uuid] = true
         usedSlots = usedSlots + 1
+        normalItemsSold = normalItemsSold + 1
         print("Đã tạo listing cho vật phẩm: " .. itemId .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
         return true
     else
@@ -476,164 +678,34 @@ local function createItemListing(uuid, itemId, itemClass, amount, rap)
         return false
     end
 end
--- Thêm hàm debug này vào đầu script hoặc trước hàm createHugeListing
-local function debugPrice(petId, originalRap, calculatedPrice, strategy)
-    print("===== DEBUG PRICE CALCULATION =====")
-    print("Pet ID: " .. petId)
-    print("Original RAP: " .. originalRap)
-    print("Strategy: " .. strategy)
-    print("Calculated Price: " .. calculatedPrice)
-    print("Discount Amount: " .. (originalRap - calculatedPrice))
-    print("Discount Percentage: " .. string.format("%.2f%%", 100 * (1 - calculatedPrice/originalRap)))
-    print("==================================")
-end
 
--- Thay thế hoàn toàn hàm createHugeListing hiện tại bằng phiên bản đã sửa
-local function createHugeListing(uuid, petData, rap)
-    -- Kiểm tra xem đã list pet này chưa
-    if listedItems[uuid] then return false end
-    
-    -- Kiểm tra xem còn slot trống không
-    if usedSlots >= MAX_BOOTH_SLOTS then
-        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
-        return false
+-- Hàm so sánh ưu tiên cho pet Huge
+local function compareHugePriority(pet1, pet2)
+    -- Nếu Config["Prioritize Low RAP"] được bật, ưu tiên pet có RAP thấp
+    if getgenv().Config["Prioritize Low RAP"] then
+        return pet1.Rap < pet2.Rap
     end
     
-    local typeString = getHugeType(petData.id, petData)
-    local hugeConfig = getgenv().hugemode[typeString]
+    -- Nếu cả hai pet đều trong danh sách ưu tiên
+    local pet1Priority, pet2Priority = 999, 999
     
-    -- Kiểm tra xem có cần bán không
-    if hugeConfig.sell == false then
-        return false
-    end
-    
-    -- Tính giá dựa trên chiến lược
-    local adjustment = hugeConfig.strategy or ""
-    local multiplier = 1
-    
-    print("Chiến lược áp dụng cho " .. petData.id .. ": " .. adjustment)
-    
-    if adjustment ~= "" then
-        local sign = adjustment:sub(1, 1)
-        local percentStr = adjustment:sub(2, -2)
-        local percent = tonumber(percentStr)
+    for i, priorityPet in ipairs(getgenv().hugePriority or {}) do
+        if string.find(pet1.Item.id, priorityPet) then
+            pet1Priority = i
+        end
         
-        if percent then -- Đảm bảo percent là số hợp lệ
-            print("Áp dụng " .. sign .. percentStr .. "% cho RAP: " .. rap)
-            if sign == "+" then
-                multiplier = 1 + (percent / 100)
-            elseif sign == "-" then
-                multiplier = 1 - (percent / 100)
-            end
-        else
-            print("Cảnh báo: Phần trăm không hợp lệ trong chiến lược: " .. adjustment)
+        if string.find(pet2.Item.id, priorityPet) then
+            pet2Priority = i
         end
     end
     
-    local originalPrice = math.floor(rap * multiplier)
-    
-    -- Debug thông tin tính giá
-    debugPrice(petData.id, rap, originalPrice, hugeConfig.strategy)
-    
-    -- Đảm bảo giá LUÔN được giảm theo đúng phần trăm
-    local price = originalPrice
-    if hugeConfig.strategy:sub(1, 1) == "-" then
-        -- Bắt buộc giá thấp hơn RAP một cách rõ ràng
-        local percentStr = hugeConfig.strategy:sub(2, -2)
-        local percent = tonumber(percentStr) or 2
-        local forcedPrice = math.floor(rap * (1 - percent/100))
-        
-        print("Đang áp dụng giảm giá mạnh từ " .. originalPrice .. " xuống " .. forcedPrice .. " cho " .. petData.id)
-        price = forcedPrice
+    -- Nếu chỉ pet 1 hoặc pet 2 nằm trong danh sách ưu tiên
+    if pet1Priority ~= pet2Priority then
+        return pet1Priority < pet2Priority
     end
     
-    if price <= 0 then
-        warn("Giá không hợp lệ cho " .. petData.id)
-        return false
-    end
-    
-    local maxAmount = math.min(petData._am or 1, 15000, math.floor(25e9 / price))
-    if maxAmount <= 0 then
-        warn("Số lượng không hợp lệ cho " .. petData.id)
-        return false
-    end
-    
-    print("Đang thử bán " .. petData.id .. " với giá " .. price .. " (" .. hugeConfig.strategy .. " của RAP " .. rap .. ")")
-    
-    local success, err = pcall(function()
-        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(price), maxAmount)
-    end)
-    
-    if success then
-        listedItems[uuid] = true
-        usedSlots = usedSlots + 1
-        print("✅ ĐÃ BÁN PET HUGE THÀNH CÔNG: " .. petData.id .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
-        return true
-    else
-        warn("❌ KHÔNG THỂ BÁN PET: " .. tostring(err))
-        return false
-    end
-end
--- Hàm tạo listing cho pet Huge
-local function createHugeListing(uuid, petData, rap)
-    -- Kiểm tra xem đã list pet này chưa
-    if listedItems[uuid] then return false end
-    
-    -- Kiểm tra xem còn slot trống không
-    if usedSlots >= MAX_BOOTH_SLOTS then
-        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
-        return false
-    end
-    
-    local typeString = getHugeType(petData.id, petData)
-    local hugeConfig = getgenv().hugemode[typeString]
-    
-    -- Kiểm tra xem có cần bán không
-    if hugeConfig.sell == false then
-        return false
-    end
-    
-    -- Tính giá dựa trên chiến lược
-    local adjustment = hugeConfig.strategy or ""
-    local multiplier = 1
-    
-    if adjustment ~= "" then
-        local sign = adjustment:sub(1, 1)
-        local percentStr = adjustment:sub(2, -2)
-        local percent = tonumber(percentStr)
-        
-        if sign == "+" then
-            multiplier = 1 + percent / 100
-        elseif sign == "-" then
-            multiplier = 1 - percent / 100
-        end
-    end
-    
-    local price = math.floor(rap * multiplier)
-    if price <= 0 then
-        warn("Giá không hợp lệ cho " .. petData.id)
-        return false
-    end
-    
-    local maxAmount = math.min(petData._am or 1, 15000, math.floor(25e9 / price))
-    if maxAmount <= 0 then
-        warn("Số lượng không hợp lệ cho " .. petData.id)
-        return false
-    end
-    
-    local success, err = pcall(function()
-        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(price), maxAmount)
-    end)
-    
-    if success then
-        listedItems[uuid] = true
-        usedSlots = usedSlots + 1
-        print("Đã tạo listing cho pet Huge: " .. petData.id .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
-        return true
-    else
-        warn("Lỗi khi tạo listing cho pet Huge: " .. tostring(err))
-        return false
-    end
+    -- Mặc định sắp xếp theo RAP giảm dần
+    return pet1.Rap > pet2.Rap
 end
 
 -- Logic teleport và chiếm gian hàng (đã cải tiến)
@@ -712,6 +784,21 @@ spawn(function()
                 print("Không tìm thấy server để hop")
             end
         end
+    end
+end)
+
+-- Thêm thông tin thống kê định kỳ
+spawn(function()
+    while true do
+        task.wait(60) -- Mỗi phút hiển thị thống kê một lần
+        
+        print("===== THỐNG KÊ SCRIPT =====")
+        print("Thời gian chạy: " .. getElapsedTimeString())
+        print("Tổng số pet Huge trong kho: " .. totalhuge)
+        print("Số pet Huge đã listing: " .. hugesSold)
+        print("Số vật phẩm thường đã listing: " .. normalItemsSold)
+        print("Slot sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+        print("============================")
     end
 end)
 
@@ -799,21 +886,8 @@ spawn(function()
             end
         end
         
-        -- Đối với pet Huge, sắp xếp theo RAP tăng dần (thấp đến cao) để bán nhanh hơn
-        -- Đối với các vật phẩm thường, vẫn giữ thứ tự RAP giảm dần
-        table.sort(BoothQueue, function(a, b)
-            -- Nếu cả hai cùng là Huge hoặc cùng không phải Huge, sắp xếp theo yêu cầu
-            if (a.Type == "Huge" and b.Type == "Huge") then
-                -- Sắp xếp Huge theo RAP tăng dần (thấp trước)
-                return a.Rap < b.Rap
-            elseif (a.Type ~= "Huge" and b.Type ~= "Huge") then
-                -- Sắp xếp vật phẩm thường theo RAP giảm dần (cao trước)
-                return a.Rap > b.Rap
-            else
-                -- Ưu tiên pet Huge trước vật phẩm thường
-                return a.Type == "Huge"
-            end
-        end)
+        -- Sắp xếp theo thứ tự ưu tiên tùy chỉnh
+        table.sort(BoothQueue, compareHugePriority)
         
         -- Tính toán số lượng slot còn trống
         local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
@@ -844,63 +918,12 @@ spawn(function()
             else
                 createItemListing(ItemInfo.UUID, ItemInfo.Item.id, ItemInfo.Class, ItemInfo.Item._am or 1, ItemInfo.Rap)
             end
-            task.wait(1) -- Đợi giữa các listing để tránh rate limit
+            task.wait(waitTimeBetweenListings or 1) -- Đợi giữa các listing để tránh rate limit
         end
     end
 end)
-
--- Thêm chức năng tính toán thời gian listing
-local listingStartTime = os.time()
-
-local function getElapsedTimeString()
-    local elapsedSeconds = os.time() - listingStartTime
-    local hours = math.floor(elapsedSeconds / 3600)
-    local minutes = math.floor((elapsedSeconds % 3600) / 60)
-    local seconds = elapsedSeconds % 60
-    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
-end
-
--- Thêm biến đếm số lượng Huge đã bán
-local hugesSold = 0
-local normalItemsSold = 0
-
--- Cập nhật hàm createHugeListing để đếm số Huge đã bán
-local oldCreateHugeListing = createHugeListing
-createHugeListing = function(uuid, petData, rap)
-    local result = oldCreateHugeListing(uuid, petData, rap)
-    if result then
-        hugesSold = hugesSold + 1
-    end
-    return result
-end
-
--- Cập nhật hàm createItemListing để đếm số vật phẩm thường đã bán
-local oldCreateItemListing = createItemListing
-createItemListing = function(uuid, itemId, itemClass, amount, rap)
-    local result = oldCreateItemListing(uuid, itemId, itemClass, amount, rap)
-    if result then
-        normalItemsSold = normalItemsSold + 1
-    end
-    return result
-end
 
 -- In thông tin vị trí khởi động
 print("Vị trí khi khởi động: " .. getCurrentLocation())
 print("Script đã khởi động thành công với icon Trading Plaza: " .. TRADING_PLAZA_ICON)
 print("Đã cấu hình ưu tiên bán pet Huge theo RAP từ thấp đến cao")
-
--- Thêm thông tin thống kê định kỳ
--- Find this section near the end of the script where we added the statistics display
-spawn(function()
-    while true do
-        task.wait(60) -- Mỗi phút hiển thị thống kê một lần
-        
-        print("===== THỐNG KÊ SCRIPT =====")
-        print("Thời gian chạy: " .. getElapsedTimeString())
-        print("Tổng số pet Huge trong kho: " .. totalhuge)
-        print("Số pet Huge đã listing: " .. hugesSold)
-        print("Số vật phẩm thường đã listing: " .. normalItemsSold)
-        print("Slot sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
-        print("============================")
-    end
-end) -- Add this "end" if it's missing
