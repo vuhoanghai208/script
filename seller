@@ -54,6 +54,41 @@ end
 local VirtualUser = game:GetService("VirtualUser")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
+-- ===== GUI HIỂN THỊ SỐ HUGE =====
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "HugeCountGUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Name = "Container"
+frame.Size = UDim2.new(0, 200, 0, 50)
+frame.Position = UDim2.new(0, 10, 0, 10)
+frame.BackgroundTransparency = 0.5
+frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local label = Instance.new("TextLabel")
+label.Name = "HugeCountLabel"
+label.Size = UDim2.new(1, -10, 1, -10)
+label.Position = UDim2.new(0, 5, 0, 5)
+label.BackgroundTransparency = 1
+label.Font = Enum.Font.SourceSansBold
+label.TextSize = 24
+label.TextColor3 = Color3.fromRGB(255, 255, 255)
+label.TextXAlignment = Enum.TextXAlignment.Left
+label.TextYAlignment = Enum.TextYAlignment.Center
+label.Parent = frame
+
+spawn(function()
+    while task.wait(2) do
+        local count = countHugePets() or 0
+        label.Text = ("Huge Pets: %d"):format(count)
+    end
+end)
+-- ================================
+
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
@@ -121,7 +156,6 @@ local function getElapsedTimeString()
     local seconds = elapsedSeconds % 60
     return string.format("%02d:%02d:%02d", hours, minutes, seconds)
 end
-
 -- Thêm biến đếm số lượng Huge đã bán
 local hugesSold = 0
 local normalItemsSold = 0
@@ -277,15 +311,21 @@ local function teleportToTradingPlaza()
 end
 
 -- Hàm tính RAP
-local function GetRap(Class, ItemTable)
-    local success, result = pcall(function()
-        local Item = require(Library.Items[Class .. "Item"])(ItemTable.id)
-        if ItemTable.sh then Item:SetShiny(true) end
-        if ItemTable.pt == 1 then Item:SetGolden() end
-        if ItemTable.pt == 2 then Item:SetRainbow() end
-        if ItemTable.tn then Item:SetTier(ItemTable.tn) end
-        return RAPCmds.Get(Item) or 0
+local function GetRap(itemClass, itemData)
+    local ok, result = pcall(function()
+        -- khởi tạo item object
+        local itm = require(Library.Items[itemClass .. "Item"])(itemData.id)
+        if itemData.sh then itm:SetShiny(true) end
+        if itemData.pt == 1 then itm:SetGolden() end
+        if itemData.pt == 2 then itm:SetRainbow() end
+        return itm:GetRAP() or 0
     end)
+    if not ok then
+        warn("Lỗi GetRap:", result)
+        return 0
+    end
+    return result
+end
     
     if not success then
         warn("Lỗi khi tính RAP: " .. tostring(result))
@@ -534,15 +574,36 @@ local function calculatePrice(rap, strategy, petId)
 end
 
 -- Hàm tạo listing cho pet Huge
-local function createHugeListing(uuid, petData, rap)
-    -- Kiểm tra xem đã list pet này chưa
-    if listedItems[uuid] then return false end
-    
-    -- Kiểm tra xem còn slot trống không
-    if usedSlots >= MAX_BOOTH_SLOTS then
-        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+local function createHugeListing(uuid, petData)
+    local rap = GetRap("Pet", petData)
+
+    -- Bỏ qua nếu RAP dưới ngưỡng
+    local minRap = getgenv().Config["Minimum Price"] or 0
+    if rap < minRap then
+        if getgenv().Config["Debug Mode"] then
+            print(("Bỏ qua %s vì RAP (%d) < Minimum Price (%d)"):format(petData.id, rap, minRap))
+        end
         return false
     end
+
+    -- Lấy chiến lược và tính giá
+    local typeKey = getHugeType(petData.id, petData)
+    local cfg = getgenv().hugemode[typeKey]
+    if not cfg or not cfg.sell then return false end
+
+    local calcPrice, stratDesc = calculatePrice(rap, cfg.strategy)
+
+    -- Áp khung min/max riêng của từng hugemode
+    local minP = cfg.min_price or 0
+    local maxP = cfg.max_price or math.huge
+    local final = math.clamp(calcPrice, minP, maxP)
+
+    debugPrice(petData.id, rap, calcPrice, stratDesc, final)
+
+    -- rồi mới Network.Invoke như cũ...
+    -- …
+end
+
     
     -- Kiểm tra blacklist
     for _, blacklistedPet in ipairs(getgenv().hugeBlacklist or {}) do
@@ -587,7 +648,41 @@ local function createHugeListing(uuid, petData, rap)
     end
     
     -- Tính giá dựa trên chiến lược
-    local calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy, petData.id)
+    local function calculatePrice(rap, strategy)
+    local multiplier = 1
+    local desc = strategy
+
+    if strategy == "market" then
+        multiplier = 1
+    elseif strategy == "auto" then
+        local used = usedSlots / MAX_BOOTH_SLOTS
+        if used > 0.8 then multiplier = 0.9
+        elseif used > 0.5 then multiplier = 0.95
+        end
+    elseif type(strategy) == "string" then
+        -- match "+10%" hoặc "-2%"
+        local sign, pct = strategy:match("^([%+%-])([%d%.]+)%%$")
+        pct = tonumber(pct)
+        if sign == "+" then
+            multiplier = 1 + pct/100
+        elseif sign == "-" then
+            multiplier = 1 - pct/100
+        end
+    elseif type(strategy) == "number" then
+        multiplier = 1 + (strategy/100)
+        desc = (strategy>=0 and "+"..strategy or tostring(strategy)).."%"
+    end
+
+    local price = math.floor(rap * multiplier)
+
+    if getgenv().Config["Randomize Price"] then
+        -- +/- range% thực ra: getgenv().Config["Random Range"]
+        local r = getgenv().Config["Random Range"]/100
+        price = math.floor(price * (1 + (math.random()*2 - 1)*r))
+    end
+
+    return price, desc
+end
     
     -- Áp dụng giới hạn giá
     local minPrice = hugeConfig.min_price or getgenv().Config["Minimum Price"] or 0
@@ -841,12 +936,7 @@ spawn(function()
             for ItemId, ItemData in pairs(Items) do
                 local amount = ItemData._am or 1
                 if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
-                    local rap = 0
-                    pcall(function()
-                        local itemObject = require(Library.Items[Class .. "Item"])(ItemData.id)
-                        rap = itemObject:GetRAP() or 0
-                    end)
-                    
+                    local rap = GetRap("Pet", PetData)                    
                     if rap > 0 then
                         table.insert(BoothQueue, {
                             UUID = ItemId,
