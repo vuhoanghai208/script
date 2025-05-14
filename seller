@@ -709,12 +709,19 @@ end
 
 -- Hàm so sánh ưu tiên cho pet Huge
 local function compareHugePriority(pet1, pet2)
-    -- Nếu Config["Prioritize Low RAP"] được bật, ưu tiên pet có RAP thấp
-    if getgenv().Config["Prioritize Low RAP"] then
-        return pet1.Rap < pet2.Rap
+    -- Ưu tiên #1: Sell pet Huge dạng bình thường trước
+    local pet1IsNormal = pet1.HugeType == "All Huges Normal"
+    local pet2IsNormal = pet2.HugeType == "All Huges Normal"
+    
+    if pet1IsNormal and not pet2IsNormal then
+        return true -- Ưu tiên pet1 nếu nó là Normal và pet2 không phải
+    elseif not pet1IsNormal and pet2IsNormal then
+        return false -- Ưu tiên pet2 nếu nó là Normal và pet1 không phải
     end
     
-    -- Nếu cả hai pet đều trong danh sách ưu tiên
+    -- Nếu cả hai đều là Normal hoặc đều không phải Normal, tiếp tục với tiêu chí tiếp theo
+    
+    -- Ưu tiên #2: Nếu trong danh sách ưu tiên
     local pet1Priority, pet2Priority = 999, 999
     
     for i, priorityPet in ipairs(getgenv().hugePriority or {}) do
@@ -727,13 +734,17 @@ local function compareHugePriority(pet1, pet2)
         end
     end
     
-    -- Nếu chỉ pet 1 hoặc pet 2 nằm trong danh sách ưu tiên
+    -- Nếu chỉ một trong hai pet nằm trong danh sách ưu tiên hoặc cả hai có thứ tự ưu tiên khác nhau
     if pet1Priority ~= pet2Priority then
         return pet1Priority < pet2Priority
     end
     
-    -- Mặc định sắp xếp theo RAP giảm dần
-    return pet1.Rap > pet2.Rap
+    -- Ưu tiên #3: Sắp xếp theo RAP (thấp trước nếu config bật, ngược lại cao trước)
+    if getgenv().Config["Prioritize Low RAP"] then
+        return pet1.Rap < pet2.Rap
+    else
+        return pet1.Rap > pet2.Rap
+    end
 end
 
 -- Logic teleport và chiếm gian hàng (đã cải tiến)
@@ -865,59 +876,100 @@ spawn(function()
         end
         
         -- Tạo danh sách vật phẩm để list
-        local BoothQueue = {}
+local BoothQueue = {}
+
+-- Thêm tất cả pet Huge vào hàng đợi, phân loại rõ ràng
+print("Đang quét pet Huge...")
+local normalHuges = {}
+local otherHuges = {}
+
+for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+    if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+        -- Thử tính RAP, nếu lỗi vẫn thêm vào với RAP mặc định
+        local rap = 0
+        pcall(function()
+            rap = GetRap("Pet", PetData)
+        end)
         
-        -- Ưu tiên thêm pet "Huge" vào hàng đợi
-        print("Đang quét pet Huge...")
-        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
-            if string.find(PetData.id, "Huge") and not listedItems[PetId] then
-                -- Thử tính RAP, nếu lỗi vẫn thêm vào với RAP mặc định
+        if rap <= 0 then rap = 10000000 end -- 10M nếu không tính được
+        
+        local typeString = getHugeType(PetData.id, PetData)
+        local hugeInfo = {
+            UUID = PetId,
+            Item = PetData,
+            Class = "Pet",
+            Rap = rap,
+            Type = "Huge",
+            HugeType = typeString
+        }
+        
+        -- Phân loại Huge thường và Huge đặc biệt
+        if typeString == "All Huges Normal" then
+            table.insert(normalHuges, hugeInfo)
+            print("Đã tìm thấy Huge thường: " .. PetData.id .. " (RAP: " .. rap .. ")")
+        else
+            table.insert(otherHuges, hugeInfo)
+            print("Đã tìm thấy Huge đặc biệt: " .. PetData.id .. " (" .. typeString .. ", RAP: " .. rap .. ")")
+        end
+    end
+end
+
+-- Sắp xếp Huge thường theo RAP
+if getgenv().Config["Prioritize Low RAP"] then
+    table.sort(normalHuges, function(a, b) return a.Rap < b.Rap end)
+    print("Sắp xếp Huge thường theo RAP tăng dần")
+else
+    table.sort(normalHuges, function(a, b) return a.Rap > b.Rap end)
+    print("Sắp xếp Huge thường theo RAP giảm dần")
+end
+
+-- Sắp xếp Huge đặc biệt theo RAP
+if getgenv().Config["Prioritize Low RAP"] then
+    table.sort(otherHuges, function(a, b) return a.Rap < b.Rap end)
+    print("Sắp xếp Huge đặc biệt theo RAP tăng dần")
+else
+    table.sort(otherHuges, function(a, b) return a.Rap > b.Rap end)
+    print("Sắp xếp Huge đặc biệt theo RAP giảm dần")
+end
+
+-- Thêm tất cả Huge thường vào hàng đợi trước
+for _, hugeInfo in ipairs(normalHuges) do
+    table.insert(BoothQueue, hugeInfo)
+end
+
+-- Sau đó thêm tất cả Huge đặc biệt
+for _, hugeInfo in ipairs(otherHuges) do
+    table.insert(BoothQueue, hugeInfo)
+end
+
+print("Đã sắp xếp " .. #normalHuges .. " Huge thường và " .. #otherHuges .. " Huge đặc biệt để bán")
+
+-- Thêm vật phẩm thường vào hàng đợi (chỉ khi ít pet Huge)
+if #BoothQueue < 5 then
+    for Class, Items in pairs(Savemod.Get().Inventory) do
+        if Class == "Pet" then continue end -- Xử lý pet riêng
+        
+        for ItemId, ItemData in pairs(Items) do
+            local amount = ItemData._am or 1
+            if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
                 local rap = 0
-                pcall(function()
-                    rap = GetRap("Pet", PetData)
+                pcall(function() 
+                    rap = GetRap(Class, ItemData) 
                 end)
                 
-                if rap <= 0 then rap = 10000000 end -- 10M nếu không tính được
+                if rap <= 0 then rap = 100000 end -- 100k nếu không tính được
                 
-                local typeString = getHugeType(PetData.id, PetData)
                 table.insert(BoothQueue, {
-                    UUID = PetId,
-                    Item = PetData,
-                    Class = "Pet",
+                    UUID = ItemId,
+                    Item = ItemData,
+                    Class = Class,
                     Rap = rap,
-                    Type = "Huge",
-                    HugeType = typeString
+                    Type = "Normal"
                 })
-                print("Đã tìm thấy Huge pet: " .. PetData.id)
             end
         end
-        
-        -- Thêm vật phẩm thường vào hàng đợi (chỉ khi ít pet Huge)
-        if #BoothQueue < 5 then
-            for Class, Items in pairs(Savemod.Get().Inventory) do
-                if Class == "Pet" then continue end -- Xử lý pet riêng
-                
-                for ItemId, ItemData in pairs(Items) do
-                    local amount = ItemData._am or 1
-                    if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
-                        local rap = 0
-                        pcall(function() 
-                            rap = GetRap(Class, ItemData) 
-                        end)
-                        
-                        if rap <= 0 then rap = 100000 end -- 100k nếu không tính được
-                        
-                        table.insert(BoothQueue, {
-                            UUID = ItemId,
-                            Item = ItemData,
-                            Class = Class,
-                            Rap = rap,
-                            Type = "Normal"
-                        })
-                    end
-                end
-            end
-        end
+    end
+end
         
         -- Nếu không tìm thấy pet Huge, kiểm tra tất cả pet
         if #BoothQueue == 0 then
