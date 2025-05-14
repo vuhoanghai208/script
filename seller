@@ -537,18 +537,27 @@ end
 
 -- Hàm tạo listing cho pet Huge
 local function createHugeListing(uuid, petData)
-    local rap = GetRap("Pet", petData)
-
-    -- Bỏ qua nếu RAP dưới ngưỡng
-    local minRap = getgenv().Config["Minimum Price"] or 0
-    if rap < minRap then
-        if getgenv().Config["Debug Mode"] then
-            print(("Bỏ qua %s vì RAP (%d) < Minimum Price (%d)"):format(petData.id, rap, minRap))
-        end
+    -- Force sell ALL huge pets - thêm dòng này để đảm bảo bán tất cả pet huge
+    if not string.find(petData.id, "Huge") then
         return false
     end
+    
+    print("Đang xử lý pet: " .. petData.id)
+    
+    local rap = 0
+    pcall(function()
+        rap = GetRap("Pet", petData)
+    end)
+    
+    if rap <= 0 then
+        -- Nếu không thể tính được RAP, gán giá mặc định
+        rap = 10000000 -- 10M mặc định
+        print("Không thể tính RAP cho " .. petData.id .. ", sử dụng giá mặc định: 10M")
+    end
 
-    -- Kiểm tra blacklist
+    -- Bỏ qua kiểm tra RAP tối thiểu để đảm bảo bán tất cả pet
+
+    -- Kiểm tra blacklist - Giữ lại chức năng này nếu muốn
     for _, blacklistedPet in ipairs(getgenv().hugeBlacklist or {}) do
         if string.find(petData.id, blacklistedPet) then
             if getgenv().Config["Debug Mode"] then
@@ -560,12 +569,20 @@ local function createHugeListing(uuid, petData)
     
     -- Lấy cấu hình pet
     local typeString = getHugeType(petData.id, petData)
-    local hugeConfig = getgenv().hugemode[typeString]
+    local hugeConfig = getgenv().hugemode[typeString] or getgenv().hugemode["All Huges Normal"]
     
-    -- Kiểm tra xem có cấu hình hợp lệ không
-    if not hugeConfig or not hugeConfig.sell then 
-        return false 
+    -- Đảm bảo luôn có cấu hình hợp lệ
+    if not hugeConfig then
+        hugeConfig = {
+            strategy = "-2%",
+            sell = true,
+            min_price = 10000000,
+            max_price = 1000000000
+        }
     end
+    
+    -- Bật bán cho tất cả pet
+    hugeConfig.sell = true
     
     -- Kiểm tra cấu hình tùy chỉnh cho pet cụ thể
     for specificPet, customConfig in pairs(getgenv().customPetPricing or {}) do
@@ -591,29 +608,36 @@ local function createHugeListing(uuid, petData)
     end
     
     -- Tính giá dựa trên chiến lược
-    local calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy)
+    local calculatedPrice, strategyDescription
+    pcall(function()
+        calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy or "-2%")
+    end)
+    
+    if not calculatedPrice then
+        calculatedPrice = rap * 0.98 -- Mặc định giảm 2%
+        strategyDescription = "-2%"
+    end
     
     -- Áp dụng giới hạn giá
-    local minPrice = hugeConfig.min_price or getgenv().Config["Minimum Price"] or 0
-    local maxPrice = hugeConfig.max_price or getgenv().Config["Maximum Price"] or math.huge
+    local minPrice = hugeConfig.min_price or getgenv().Config["Minimum Price"] or 5000000
+    local maxPrice = hugeConfig.max_price or getgenv().Config["Maximum Price"] or 1000000000
     
     local finalPrice = math.max(minPrice, math.min(maxPrice, calculatedPrice))
     
     -- Debug thông tin tính giá
-    debugPrice(petData.id, rap, calculatedPrice, strategyDescription, finalPrice)
+    pcall(function()
+        debugPrice(petData.id, rap, calculatedPrice, strategyDescription, finalPrice)
+    end)
     
     if finalPrice <= 0 then
-        warn("Giá không hợp lệ cho " .. petData.id)
-        return false
+        finalPrice = 10000000 -- 10M mặc định nếu tính sai
+        print("Giá tính sai cho " .. petData.id .. ", dùng giá mặc định: 10M")
     end
     
     local maxAmount = math.min(petData._am or 1, 15000, math.floor(25e9 / finalPrice))
-    if maxAmount <= 0 then
-        warn("Số lượng không hợp lệ cho " .. petData.id)
-        return false
-    end
+    if maxAmount <= 0 then maxAmount = 1 end
     
-    print("Đang thử bán " .. petData.id .. " với giá " .. finalPrice .. " (" .. strategyDescription .. " của RAP " .. rap .. ")")
+    print("Đang thử bán " .. petData.id .. " với giá " .. finalPrice)
     
     local success, err = pcall(function()
         return Network.Invoke("Booths_CreateListing", uuid, math.ceil(finalPrice), maxAmount)
@@ -812,14 +836,18 @@ spawn(function()
         task.wait(10)
         
         if getCurrentLocation() ~= "TRADING_PLAZA" then
+            print("Không ở Trading Plaza, đợi...")
+            task.wait(5)
             continue
         end
         
         -- Kiểm tra xem có gian hàng không
         if not currentBooth then
+            print("Không tìm thấy gian hàng, đang tìm...")
             occupyBooth()
             if not currentBooth then
                 print("Không tìm thấy gian hàng, đang thử lại...")
+                task.wait(5)
                 continue
             end
         end
@@ -830,23 +858,55 @@ spawn(function()
         
         -- Kiểm tra xem đã đầy slot chưa
         if usedSlots >= MAX_BOOTH_SLOTS then
-            print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng, chờ đến lần reset")
-            task.wait(60) -- Đợi 1 phút trước khi kiểm tra lại
+            print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng, xóa tất cả listing để làm mới")
+            removeAllListings()
+            task.wait(5)
             continue
         end
         
         -- Tạo danh sách vật phẩm để list
         local BoothQueue = {}
         
-        -- Thêm vật phẩm thường vào hàng đợi
-        for Class, Items in pairs(Savemod.Get().Inventory) do
-            if Class == "Pet" then continue end -- Xử lý pet riêng
-            
-            for ItemId, ItemData in pairs(Items) do
-                local amount = ItemData._am or 1
-                if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
-                    local rap = GetRap(Class, ItemData)
-                    if rap > 0 then
+        -- Ưu tiên thêm pet "Huge" vào hàng đợi
+        print("Đang quét pet Huge...")
+        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+            if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+                -- Thử tính RAP, nếu lỗi vẫn thêm vào với RAP mặc định
+                local rap = 0
+                pcall(function()
+                    rap = GetRap("Pet", PetData)
+                end)
+                
+                if rap <= 0 then rap = 10000000 end -- 10M nếu không tính được
+                
+                local typeString = getHugeType(PetData.id, PetData)
+                table.insert(BoothQueue, {
+                    UUID = PetId,
+                    Item = PetData,
+                    Class = "Pet",
+                    Rap = rap,
+                    Type = "Huge",
+                    HugeType = typeString
+                })
+                print("Đã tìm thấy Huge pet: " .. PetData.id)
+            end
+        end
+        
+        -- Thêm vật phẩm thường vào hàng đợi (chỉ khi ít pet Huge)
+        if #BoothQueue < 5 then
+            for Class, Items in pairs(Savemod.Get().Inventory) do
+                if Class == "Pet" then continue end -- Xử lý pet riêng
+                
+                for ItemId, ItemData in pairs(Items) do
+                    local amount = ItemData._am or 1
+                    if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
+                        local rap = 0
+                        pcall(function() 
+                            rap = GetRap(Class, ItemData) 
+                        end)
+                        
+                        if rap <= 0 then rap = 100000 end -- 100k nếu không tính được
+                        
                         table.insert(BoothQueue, {
                             UUID = ItemId,
                             Item = ItemData,
@@ -859,27 +919,34 @@ spawn(function()
             end
         end
         
-        -- Thêm pet "Huge" vào hàng đợi
-        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
-            if string.find(PetData.id, "Huge") and not listedItems[PetId] then
-                local rap = GetRap("Pet", PetData)
-                
-                if rap > 0 then
-                    local typeString = getHugeType(PetData.id, PetData)
-                    table.insert(BoothQueue, {
-                        UUID = PetId,
-                        Item = PetData,
-                        Class = "Pet",
-                        Rap = rap,
-                        Type = "Huge",
-                        HugeType = typeString
-                    })
+        -- Nếu không tìm thấy pet Huge, kiểm tra tất cả pet
+        if #BoothQueue == 0 then
+            print("Không tìm thấy pet Huge, kiểm tra tất cả pet khác...")
+            for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+                if not listedItems[PetId] then
+                    -- Tính RAP nếu được, nếu không thì dùng giá mặc định
+                    local rap = 0
+                    pcall(function()
+                        rap = GetRap("Pet", PetData)
+                    end)
+                    
+                    if rap > 0 then
+                        table.insert(BoothQueue, {
+                            UUID = PetId,
+                            Item = PetData,
+                            Class = "Pet",
+                            Rap = rap,
+                            Type = "Normal Pet"
+                        })
+                    end
                 end
             end
         end
         
         -- Sắp xếp theo thứ tự ưu tiên tùy chỉnh
-        table.sort(BoothQueue, compareHugePriority)
+        pcall(function()
+            table.sort(BoothQueue, compareHugePriority)
+        end)
         
         -- Tính toán số lượng slot còn trống
         local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
