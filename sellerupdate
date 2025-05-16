@@ -1,0 +1,1491 @@
+-- Đợi game tải hoàn tất
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- Khai báo dịch vụ và thư viện
+local VirtualUser = game:GetService("VirtualUser")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Library = ReplicatedStorage.Library
+local Client = Library.Client
+local RAPCmds = require(Client.RAPCmds)
+local Network = require(Client.Network)
+local Savemod = require(Client.Save)
+local Functions = require(ReplicatedStorage.Library.Functions)
+local Items = require(ReplicatedStorage.Library.Items.Types)
+
+-- ID các map và icon
+local TRADING_PLAZA_ICON = "rbxassetid://15048276787" -- Official Trading Plaza icon
+local PLACE_IDS = {
+    MAIN_WORLD = 8737899170,
+    PLAZA_WORLD = 16498369169,
+    TRADING_PLAZA_1 = 15588442388,
+    TRADING_PLAZA_2 = 15502339080
+}
+
+-- Hằng số để tránh magic numbers
+local CONSTANTS = {
+    MAX_BOOTH_SLOTS = 25,
+    DEFAULT_RAP_HUGE = 10000000, -- 10M mặc định cho pets Huge
+    DEFAULT_RAP_NORMAL = 100000, -- 100K mặc định cho pets thường
+    MAX_LISTING_AMOUNT = 15000,
+    MAX_LISTING_VALUE = 25000000000, -- 25B
+    WAIT_BETWEEN_BOOTH_ATTEMPTS = 5, -- giây
+    WAIT_BETWEEN_LISTINGS = 1, -- giây
+    WAIT_BETWEEN_SCANS = 10, -- giây
+    WAIT_IF_NO_ITEMS = 60, -- giây
+    WAIT_GEMS_CHECK = 30, -- giây
+    MAX_TELEPORT_ATTEMPTS = 3,
+    HOP_SERVER_TIME = 60 * 60, -- 60 phút (3600 giây)
+    ANTI_AFK_INTERVAL = 30 -- 30 giây
+}
+
+-- Biến global để theo dõi
+local totalhuge = 0
+local listedItems = {}
+local currentBooth = nil
+local usedSlots = 0
+local MAX_BOOTH_SLOTS = CONSTANTS.MAX_BOOTH_SLOTS
+-- Thêm chức năng tính toán thời gian listing
+local listingStartTime = os.time()
+-- Thêm biến đếm số lượng Huge đã bán
+local hugesSold = 0
+local normalItemsSold = 0
+-- Thêm biến theo dõi thời gian server hop
+local lastHopTime = os.time()
+
+-- Hàm tạo giao diện hiển thị
+local function createCounterGUI()
+    -- Tạo ScreenGui
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "HugeCounterGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+
+    -- Tạo khung chính
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "CounterContainer"
+    mainFrame.Size = UDim2.new(0, 200, 0, 60)
+    mainFrame.Position = UDim2.new(0, 20, 0, 20)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    
+    -- Thêm bo góc
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = mainFrame
+    
+    -- Tạo nhãn Huge Pets
+    local hugeLabel = Instance.new("TextLabel")
+    hugeLabel.Name = "HugeCounter"
+    hugeLabel.Size = UDim2.new(1, -20, 0, 25)
+    hugeLabel.Position = UDim2.new(0, 10, 0, 5)
+    hugeLabel.BackgroundTransparency = 1
+    hugeLabel.Font = Enum.Font.GothamBold
+    hugeLabel.TextSize = 16
+    hugeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hugeLabel.Text = "Huge Pets: Counting..."
+    hugeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hugeLabel.Parent = mainFrame
+    
+    -- Tạo nhãn Gems
+    local gemsLabel = Instance.new("TextLabel")
+    gemsLabel.Name = "GemCounter"
+    gemsLabel.Size = UDim2.new(1, -20, 0, 25)
+    gemsLabel.Position = UDim2.new(0, 10, 0, 30)
+    gemsLabel.BackgroundTransparency = 1
+    gemsLabel.Font = Enum.Font.GothamBold
+    gemsLabel.TextSize = 16
+    gemsLabel.TextColor3 = Color3.fromRGB(85, 255, 255)
+    gemsLabel.Text = "Gems: Counting..."
+    gemsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    gemsLabel.Parent = mainFrame
+    
+    return hugeLabel, gemsLabel
+end
+
+-- Tạo giao diện và lấy tham chiếu đến các nhãn
+local hugeLabel, gemsLabel = createCounterGUI()
+
+-- THÊM FUNCTIONS CHO WEBHOOK --
+-- Hàm định dạng số cho webhook
+local function Formatint(int)
+    local Suffix = {"", "k", "M", "B", "T", "Qd", "Qn", "Sx", "Sp", "Oc", "No", "De", "UDe", "DDe", "TDe", "QdDe", "QnDe", "SxDe", "SpDe", "OcDe", "NoDe", "Vg", "UVg", "DVg", "TVg", "QdVg", "QnVg", "SxVg", "SpVg", "OcVg", "NoVg", "Tg", "UTg", "DTg", "TTg", "QdTg", "QnTg", "SxTg", "SpTg", "OcTg", "NoTg", "QdAg", "QnAg", "SxAg", "SpAg", "OcAg", "NoAg", "e141", "e144", "e147", "e150", "e153", "e156", "e159", "e162", "e165", "e168", "e171", "e174", "e177", "e180", "e183", "e186", "e189", "e192", "e195", "e198", "e201", "e204", "e207", "e210", "e213", "e216", "e219", "e222", "e225", "e228", "e231", "e234", "e237", "e240", "e243", "e246", "e249", "e252", "e255", "e258", "e261", "e264", "e267", "e270", "e273", "e276", "e279", "e282", "e285", "e288", "e291", "e294", "e297", "e300", "e303"}
+    local Index = 1
+    
+    if int < 999 then 
+        return int
+    end
+    while int >= 1000 and Index < #Suffix do
+        int = int / 1000
+        Index = Index + 1
+    end
+    return string.format("%.2f%s", int, Suffix[Index])
+end
+
+local function GetAsset(Id, pt)
+    local Asset = require(Library.Directory.Pets)[Id]
+    return string.gsub(Asset and (pt == 1 and Asset.goldenThumbnail or Asset.thumbnail) or "14976456685", "rbxassetid://", "")
+end
+
+local function GetStats(Cmds, Class, ItemTable)
+    return Cmds.Get({
+        Class = { Name = Class },
+        IsA = function(InputClass) return InputClass == Class end,
+        GetId = function() return ItemTable.id end,
+        StackKey = function()
+            return HttpService:JSONEncode({id = ItemTable.id, sh = ItemTable.sh, pt = ItemTable.pt, tn = ItemTable.tn})
+        end
+    }) or nil
+end
+
+-- Hàm gửi thông báo webhook khi bán hoặc list item/pet
+local function SendWebhookSold(itemId, itemClass, price, itemData, isHuge, isSold)
+    -- Kiểm tra xem có bật webhook không
+    if not getgenv().Config["Enable Webhook Notifications"] or getgenv().Config["Link Webhook"] == "" then
+        return
+    end
+    
+    local success, result = pcall(function()
+        local pt = itemData.pt or 0
+        local sh = itemData.sh or false
+        
+        -- Lấy số lượng Huge còn lại trong inventory
+        local hugesRemaining = 0
+        pcall(function()
+            for _, pet in pairs(Savemod.Get().Inventory.Pet) do
+                if string.find(tostring(pet.id), "Huge") then
+                    hugesRemaining = hugesRemaining + 1
+                end
+            end
+        end)
+        
+        -- Lấy số gems hiện tại
+        local currentGems = 0
+        pcall(function()
+            if game.Players.LocalPlayer:FindFirstChild("leaderstats") then
+                local diamonds = game.Players.LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")
+                if diamonds then
+                    currentGems = diamonds.Value
+                end
+            end
+        end)
+        
+        -- Lấy hình ảnh và thông tin
+        local Img
+        if itemClass == "Pet" then
+            Img = string.format("https://biggamesapi.io/image/%s", GetAsset(itemId, pt))
+        else
+            -- Cố gắng lấy hình ảnh cho item không phải pet
+            pcall(function()
+                local thumbnail = require(Library.Directory.Items)[itemId] and require(Library.Directory.Items)[itemId].thumbnail
+                if thumbnail then
+                    Img = string.gsub(thumbnail, "rbxassetid://", "https://biggamesapi.io/image/")
+                else
+                    Img = "https://biggamesapi.io/image/14976456685" -- Hình ảnh mặc định
+                end
+            end)
+        end
+        
+        local Version = ""
+        if itemClass == "Pet" then
+            Version = pt == 1 and "Golden " or pt == 2 and "Rainbow " or ""
+        end
+        
+        local ItemType = isHuge and "🔴 HUGE PET" or "🔵 ITEM"
+        local ActionType = isSold and "Đã bán" or "Đã list"
+        local Title = string.format("||%s|| %s %s%s%s với giá %s gems", 
+            game.Players.LocalPlayer.Name, 
+            ActionType,
+            Version, 
+            sh and "Shiny " or "", 
+            itemId, 
+            Formatint(price))
+
+        -- Thử lấy thông tin Exist và RAP
+        local Exist, Rap
+        pcall(function()
+            local ExistCmds = require(Client.ExistCountCmds)
+            Exist = GetStats(ExistCmds, itemClass, { id = itemId, pt = pt, sh = sh, tn = nil })
+            Rap = GetStats(RAPCmds, itemClass, { id = itemId, pt = pt, sh = sh, tn = nil })
+        end)
+
+        local Body = HttpService:JSONEncode({
+            content = Config["Webhook ID"] ~= "" and string.format("<@%s>", Config["Webhook ID"]) or "",
+            embeds = {
+                {
+                    title = Title,
+                    description = ItemType,
+                    color = isHuge and 16711680 or 255, -- Màu đỏ cho Huge, màu xanh cho item thường
+                    timestamp = DateTime.now():ToIsoDate(),
+                    thumbnail = { url = Img },
+                    fields = {
+                        { 
+                            name = "💰 Thông tin bán hàng",
+                            value = string.format("🏷️ **Loại**: `%s`\n💎 **Giá**: `%s gems`\n💠 **RAP**: `%s`\n💫 **Exist**: `%s`", 
+                                itemClass,
+                                Formatint(price), 
+                                Formatint(Rap or 0), 
+                                Formatint(Exist or 0))
+                        },
+                        {
+                            name = "📊 Thông tin tài khoản",
+                            value = string.format("🐾 **Huge còn lại**: `%s`\n💰 **Gems hiện tại**: `%s`", 
+                                hugesRemaining, 
+                                Formatint(currentGems))
+                        }
+                    },
+                    footer = { text = "Auto Seller | " .. os.date("%d/%m/%Y %H:%M:%S") }
+                }
+            }
+        })
+        
+        request({
+            Url = Config["Link Webhook"],
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = Body
+        })
+        
+        local logMessage = string.format("✅ Đã gửi webhook cho %s %s | Giá: %s | Gems: %s",
+            isHuge and "HUGE PET" or "ITEM", 
+            itemId, 
+            Formatint(price), 
+            Formatint(currentGems))
+        print(logMessage)
+    end)
+    
+    if not success then
+        warn("❌ Lỗi gửi webhook: " .. tostring(result))
+    end
+end
+-- KẾT THÚC THÊM FUNCTIONS CHO WEBHOOK --
+
+-- Hàm định dạng số với hậu tố
+local function formatNumber(num)
+    if num >= 1e12 then return string.format("%.1fT", num/1e12)
+    elseif num >= 1e9 then return string.format("%.1fB", num/1e9)
+    elseif num >= 1e6 then return string.format("%.1fM", num/1e6)
+    elseif num >= 1e3 then return string.format("%.1fK", num/1e3)
+    else return tostring(num) end
+end
+
+-- Tạo hàm đếm Huge Pets cải tiến
+local function countHugePets()
+    local count = 0
+    local success, errorMsg = pcall(function()
+        -- Thử nhiều cấu trúc dữ liệu có thể có
+        local save = Savemod.Get()
+        
+        -- Cấu trúc 1: Truy cập trực tiếp đến Inventory.Pet
+        if save and save.Inventory and save.Inventory.Pet then
+            for _, pet in pairs(save.Inventory.Pet) do
+                if typeof(pet) == "table" and pet.id and string.find(tostring(pet.id), "Huge") then
+                    count = count + 1
+                end
+            end
+            return
+        end
+        
+        -- Cấu trúc 2: Vị trí thay thế có thể
+        if save and save.Pets then
+            for _, pet in pairs(save.Pets) do
+                if typeof(pet) == "table" and (pet.id or pet.n) then
+                    local petId = pet.id or pet.n or ""
+                    if string.find(tostring(petId), "Huge") then
+                        count = count + 1
+                    end
+                end
+            end
+            return
+        end
+        
+        -- Cấu trúc 3: Tìm kiếm tất cả container pet có thể
+        for key, value in pairs(save or {}) do
+            if typeof(value) == "table" then
+                for _, possiblePet in pairs(value) do
+                    if typeof(possiblePet) == "table" and (possiblePet.id or possiblePet.n) then
+                        local petId = possiblePet.id or possiblePet.n or ""
+                        if string.find(tostring(petId), "Huge") then
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Không thể đếm Huge pets: " .. tostring(errorMsg))
+        return -1 -- Chỉ báo lỗi
+    end
+    
+    return count
+end
+
+-- Cập nhật các bộ đếm
+spawn(function()
+    while task.wait(2) do
+        -- Đếm Huge Pets
+        local hugeCount = countHugePets()
+        if hugeCount >= 0 then
+            hugeLabel.Text = "Huge Pets: " .. formatNumber(hugeCount)
+            -- Cập nhật biến toàn cục
+            totalhuge = hugeCount
+        else
+            hugeLabel.Text = "Huge Pets: 0"
+            warn("Sử dụng giá trị mặc định cho bộ đếm Huge Pets")
+        end
+        
+        -- Đếm Gems
+        local gemCount = 0
+        local success, gemErr = pcall(function()
+            if game.Players.LocalPlayer:FindFirstChild("leaderstats") then
+                local diamonds = game.Players.LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")
+                if diamonds then
+                    gemCount = diamonds.Value
+                end
+            end
+        end)
+        
+        if success then
+            gemsLabel.Text = "Gems: " .. formatNumber(gemCount)
+        else
+            gemsLabel.Text = "Gems: 0"
+            warn("Lỗi đếm Gems: " .. tostring(gemErr))
+        end
+    end
+end)
+
+-- Hàm debug giá để xác định vấn đề (đơn giản hóa)
+local function debugPrice(petId, originalRap, calculatedPrice, strategy, finalPrice)
+    if not getgenv().Config["Debug Mode"] then return end
+    
+    print("===== DEBUG PRICE CALCULATION =====")
+    print("Pet ID: " .. petId)
+    print("Original RAP: " .. originalRap)
+    print("Strategy: " .. strategy)
+    print("Calculated Price: " .. calculatedPrice)
+    print("==================================")
+end
+
+local function getElapsedTimeString()
+    local elapsedSeconds = os.time() - listingStartTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+-- Chống AFK nâng cao
+-- Vô hiệu hóa các kết nối IdleEvent
+for _, v in pairs(getconnections(LocalPlayer.Idled)) do v:Disable() end
+
+-- Anti-AFK với nhiều phương pháp
+spawn(function()
+    while true do
+        task.wait(CONSTANTS.ANTI_AFK_INTERVAL)
+        
+        -- Phương pháp 1: VirtualUser ClickButton
+        pcall(function()
+            VirtualUser:ClickButton2(Vector2.new(math.random(100, 900), math.random(100, 900)))
+        end)
+        
+        -- Phương pháp 2: CaptureController
+        pcall(function()
+            if game:GetService("VirtualInputManager") then
+                game:GetService("VirtualInputManager"):SendKeyEvent(true, "w", false, game)
+                task.wait(0.1)
+                game:GetService("VirtualInputManager"):SendKeyEvent(false, "w", false, game)
+            end
+        end)
+        
+        -- Phương pháp 3: Di chuyển nhẹ nhân vật
+        pcall(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                LocalPlayer.Character.Humanoid:ChangeState(11) -- Jump state
+                task.wait(0.1)
+            end
+        end)
+        
+        -- Phương pháp 4: Dừng timer idle tracking
+        pcall(function()
+            Network.Fire("Idle Tracking: Stop Timer")
+        end)
+        
+        if getgenv().Config["Debug Mode"] then
+            print("🕒 Anti-AFK hoạt động...")
+        end
+    end
+end)
+
+-- Hook để chống server closing hoặc idle tracking
+local old
+old = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() then
+        local Name = tostring(self)
+        if table.find({"Server Closing", "Idle Tracking: Update Timer", "Move Server", "AFK Kick", "AFK Warning"}, Name) then
+            return nil
+        end
+    end
+    return old(self, ...)
+end)
+
+-- Đợi giao diện và leaderstats sẵn sàng
+local function waitForGameReady()
+    local success, result = pcall(function()
+        -- Đợi UI và leaderstats
+        while not (game:IsLoaded() and
+               LocalPlayer:FindFirstChild("PlayerGui") and
+               not LocalPlayer.PlayerGui:FindFirstChild("__INTRO") and
+               LocalPlayer.PlayerGui:FindFirstChild("MainLeft") and
+               LocalPlayer.PlayerGui.MainLeft.Left.Currency.Diamonds.Diamonds.Visible == true and
+               not LocalPlayer:FindFirstChild("GUIFX Holder")) do
+            task.wait(0.5)
+        end
+        
+        -- Đợi leaderstats
+        local timeout = 30 -- giây
+        local startTime = tick()
+        while not (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")) do
+            if tick() - startTime > timeout then
+                warn("Timeout chờ leaderstats['💎 Diamonds']")
+                return false
+            end
+            task.wait(0.5)
+        end
+        
+        return true
+    end)
+    
+    if not success or not result then
+        warn("Lỗi khi đợi game sẵn sàng: " .. tostring(result))
+        return false
+    end
+    
+    return true
+end
+
+-- Đợi game sẵn sàng
+if not waitForGameReady() then
+    warn("Game không sẵn sàng, kết thúc script")
+    return
+end
+
+print("Game đã sẵn sàng, bắt đầu chạy script")
+
+-- Hàm kiểm tra vị trí hiện tại
+local function getCurrentLocation()
+    local currentPlaceId = game.PlaceId
+    
+    if currentPlaceId == PLACE_IDS.MAIN_WORLD then
+        return "MAIN_WORLD"
+    elseif currentPlaceId == PLACE_IDS.PLAZA_WORLD then
+        return "PLAZA_WORLD"
+    elseif currentPlaceId == PLACE_IDS.TRADING_PLAZA_1 or currentPlaceId == PLACE_IDS.TRADING_PLAZA_2 then
+        return "TRADING_PLAZA"
+    else
+        return "UNKNOWN_" .. tostring(currentPlaceId)
+    end
+end
+
+-- Hàm teleport đến Trading Plaza nâng cao
+local function teleportToTradingPlaza()
+    local currentLocation = getCurrentLocation()
+    print("Vị trí hiện tại: " .. currentLocation)
+    
+    if currentLocation == "TRADING_PLAZA" then
+        print("Đã ở Trading Plaza, không cần teleport")
+        return true
+    end
+    
+    print("Đang teleport đến Trading Plaza...")
+    
+    -- Phương pháp 1: Sử dụng Network.Invoke
+    local success1 = pcall(function()
+        Network.Invoke("Travel to Trading Plaza")
+        print("Đã gọi Travel to Trading Plaza")
+        task.wait(5)
+    end)
+    
+    -- Kiểm tra lại vị trí sau phương pháp 1
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Phương pháp 1 thành công!")
+        return true
+    end
+    
+    -- Phương pháp 2: Tìm và sử dụng cổng Trading Plaza
+    print("Phương pháp 1 thất bại, thử phương pháp 2...")
+    local success2 = pcall(function()
+        -- Tìm cổng Trading Plaza trong khu vực Castle
+        local ZonesUtil = require(ReplicatedStorage.Library.Util.ZonesUtil)
+        local castleFolder = ZonesUtil.GetInteractFolder and ZonesUtil.GetInteractFolder("Castle")
+        
+        if castleFolder then
+            local portal = castleFolder:FindFirstChild("TradingPlazaPortal")
+            if portal and portal:FindFirstChild("InteractHolder") then
+                -- Teleport đến vị trí cổng
+                local portalPos = portal.InteractHolder.Position
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(portalPos)
+                    task.wait(1)
+                    
+                    -- Tương tác với cổng
+                    Network.Fire("Teleporting to Trading Plaza!")
+                    Network.Invoke("Travel to Trading Plaza")
+                    task.wait(3)
+                end
+            end
+        end
+    end)
+    
+    -- Kiểm tra lại vị trí sau phương pháp 2
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Phương pháp 2 thành công!")
+        return true
+    end
+    
+    -- Phương pháp 3: Sử dụng TeleportService trực tiếp
+    print("Phương pháp 2 thất bại, thử phương pháp 3...")
+    local success3 = pcall(function()
+        TeleportService:Teleport(PLACE_IDS.TRADING_PLAZA_1)
+        task.wait(5)
+    end)
+    
+    print("Đã thử tất cả phương pháp teleport")
+    return (getCurrentLocation() == "TRADING_PLAZA")
+end
+
+-- Cache cho RAP để tránh tính toán lại
+local rapCache = {}
+
+-- Hàm tính RAP với cache
+local function GetRap(itemClass, itemData)
+    -- Tạo key cho cache
+    local cacheKey = itemClass .. "_" .. itemData.id
+    if itemData.sh then cacheKey = cacheKey .. "_shiny" end
+    if itemData.pt == 1 then cacheKey = cacheKey .. "_golden" end
+    if itemData.pt == 2 then cacheKey = cacheKey .. "_rainbow" end
+    
+    -- Kiểm tra cache trước
+    if rapCache[cacheKey] then
+        return rapCache[cacheKey]
+    end
+    
+    -- Tính RAP nếu không có trong cache
+    local ok, result = pcall(function()
+        -- khởi tạo item object
+        local itm = require(Library.Items[itemClass .. "Item"])(itemData.id)
+        if itemData.sh then itm:SetShiny(true) end
+        if itemData.pt == 1 then itm:SetGolden() end
+        if itemData.pt == 2 then itm:SetRainbow() end
+        return itm:GetRAP() or 0
+    end)
+    
+    if not ok then
+        warn("Lỗi GetRap:", result)
+        return 0
+    end
+    
+    -- Lưu vào cache
+    rapCache[cacheKey] = result
+    return result
+end
+
+-- Hàm chiếm gian hàng
+local function occupyBooth()
+    local success, result = pcall(function()
+        -- Kiểm tra xem đã có gian hàng chưa
+        local HaveBooth = false
+        for _, Booth in ipairs(workspace.__THINGS.Booths:GetChildren()) do
+            if Booth:IsA("Model") and Booth:GetAttribute("Owner") == LocalPlayer.UserId then
+                HaveBooth = true
+                currentBooth = Booth
+                LocalPlayer.Character.HumanoidRootPart.CFrame = Booth.Table.CFrame * CFrame.new(5, 0, 0)
+                print("Đã tìm thấy gian hàng của bạn!")
+                return true
+            end
+        end
+
+        if not HaveBooth then
+            -- Tìm gian hàng gần nhất để chiếm
+            local pos, id
+            local distance = math.huge
+            local playerPos = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart.Position
+            if not playerPos then return false end
+
+            for _, v in pairs(workspace.TradingPlaza.BoothSpawns:GetChildren()) do
+                if v and v.WorldPivot then
+                    local boothPosition = v.WorldPivot.Position
+                    local currentDistance = (boothPosition - playerPos).Magnitude
+                    local boothId = v:GetAttribute("ID")
+                    if boothId and currentDistance < distance then
+                        distance = currentDistance
+                        pos = boothPosition
+                        id = boothId
+                    end
+                end
+            end
+
+            if pos and id then
+                LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(-5, 5, 0))
+                task.wait(0.5)
+                local claimSuccess = pcall(function()
+                    Network.Invoke("Booths_ClaimBooth", tostring(id))
+                end)
+                if claimSuccess then
+                    print("Đã chiếm gian hàng ID: " .. id)
+                    return true
+                else
+                    warn("Không thể chiếm gian hàng")
+                    return false
+                end
+            else
+                warn("Không tìm thấy gian hàng gần!")
+                return false
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Lỗi khi chiếm gian hàng: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Hàm gửi kim cương
+local function sendGems()
+    local success, result = pcall(function()
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        if targetUser == "" then
+            warn("Chưa cấu hình tài khoản nhận kim cương")
+            return false
+        end
+        
+        local diamondThreshold = Functions.ParseNumberSmart(getgenv().Config["Gem"])
+        local currentDiamonds = LocalPlayer.leaderstats["💎 Diamonds"].Value
+        
+        if currentDiamonds >= diamondThreshold then
+            -- Tìm ID của kim cương
+            for i, v in pairs(Savemod.Get().Inventory.Currency) do
+                if v.id == "Diamonds" then
+                    -- Giữ lại 1 tỷ kim cương
+                    local amountToSend = currentDiamonds - Functions.ParseNumberSmart("1b")
+                    
+                    -- Gửi kim cương
+                    local args = {
+                        [1] = targetUser,
+                        [2] = "Tự động gửi từ script",
+                        [3] = "Currency",
+                        [4] = tostring(i),
+                        [5] = amountToSend
+                    }
+                    
+                    ReplicatedStorage.Network["Mailbox: Send"]:InvokeServer(unpack(args))
+                    print("Đã gửi " .. tostring(amountToSend) .. " kim cương đến " .. targetUser)
+                    return true
+                end
+            end
+            warn("Không tìm thấy ID kim cương")
+        end
+        
+        return false
+    end)
+    
+    if not success then
+        warn("Lỗi khi gửi kim cương: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Đếm số slot đã sử dụng trong gian hàng
+local function countUsedBoothSlots()
+    local count = 0
+    local success, result = pcall(function()
+        if not currentBooth then return 0 end
+        
+        for _, child in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+            if child:IsA("Frame") then
+                count = count + 1
+            end
+        end
+        
+        return count
+    end)
+    
+    if not success then
+        warn("Lỗi khi đếm slot gian hàng: " .. tostring(result))
+        return 0
+    end
+    
+    return count
+end
+
+-- LƯU Ý: Hàm xóa listing này sẽ KHÔNG được gọi tự động
+-- Chỉ giữ hàm này để tham khảo, không được sử dụng
+local function removeAllListings_DISABLED()
+    print("⚠️ KHÔNG TỰ ĐỘNG XÓA LISTING - HÀM NÀY KHÔNG ĐƯỢC SỬ DỤNG")
+    return false
+end
+
+-- Hàm xác định loại pet Huge
+local function getHugeType(petId, petData)
+    if petData.pt == 1 or string.find(petId, "Golden") then
+        return "All Huges Golden"
+    elseif petData.pt == 2 or string.find(petId, "Rainbow") then
+        return "All Huges Rainbow"
+    elseif petData.sh or string.find(petId, "Shiny") then
+        return "All Huges Shiny"
+    else
+        return "All Huges Normal"
+    end
+end
+
+-- Tính giá dựa trên chiến lược (tối ưu hóa)
+local function calculatePrice(rap, strategy)
+    -- Xử lý chiến lược không hợp lệ
+    if not strategy or strategy == "" then
+        strategy = "-2%" -- Mặc định giảm 2%
+    end
+    
+    -- Chuẩn hóa các loại chiến lược
+    local multiplier = 1
+    local desc = strategy
+    
+    -- Xử lý các trường hợp đặc biệt
+    if strategy == "market" then
+        -- Giữ nguyên giá
+        multiplier = 1
+    elseif strategy == "auto" then
+        -- Tự động điều chỉnh dựa trên số slot đã dùng
+        local used = usedSlots / MAX_BOOTH_SLOTS
+        if used > 0.8 then 
+            multiplier = 0.9      -- Giảm 10% nếu sử dụng >80% slots
+        elseif used > 0.5 then 
+            multiplier = 0.95     -- Giảm 5% nếu sử dụng >50% slots
+        end
+    elseif type(strategy) == "string" then
+        -- Xử lý chuỗi như "+10%" hoặc "-2%"
+        local sign, pct = strategy:match("^([%+%-])([%d%.]+)%%$")
+        pct = tonumber(pct)
+        if sign and pct then
+            if sign == "+" then
+                multiplier = 1 + (pct/100)
+            elseif sign == "-" then
+                multiplier = 1 - (pct/100)
+            end
+        end
+    elseif type(strategy) == "number" then
+        -- Xử lý số trực tiếp
+        multiplier = 1 + (strategy/100)
+        desc = (strategy >= 0 and "+" or "") .. strategy .. "%"
+    end
+    
+    -- Tính giá cơ bản
+    local price = math.floor(rap * multiplier)
+    
+    -- Thêm độ ngẫu nhiên nếu được bật
+    if getgenv().Config["Randomize Price"] then
+        local range = getgenv().Config["Random Range"] / 100
+        local randomFactor = 1 + ((math.random() * 2 - 1) * range)
+        price = math.floor(price * randomFactor)
+    end
+    
+    return price, desc
+end
+
+-- Hàm tạo listing cho pet Huge (tối ưu hóa)
+local function createHugeListing(uuid, petData)
+    -- Kiểm tra xem là pet Huge không
+    if not string.find(petData.id, "Huge") then
+        return false
+    end
+    
+    print("📋 Đang xử lý pet: " .. petData.id)
+    
+    -- Lấy RAP từ cache hoặc tính mới
+    local rap = GetRap("Pet", petData)
+    if rap <= 0 then
+        rap = CONSTANTS.DEFAULT_RAP_HUGE
+        print("⚠️ Không thể tính RAP cho " .. petData.id .. ", sử dụng mặc định: " .. CONSTANTS.DEFAULT_RAP_HUGE)
+    end
+
+    -- Lấy cấu hình dựa trên loại pet
+    local typeString = getHugeType(petData.id, petData)
+    local hugeConfig = getgenv().hugemode[typeString]
+    
+    -- Đảm bảo luôn có cấu hình hợp lệ
+    if not hugeConfig then
+        hugeConfig = getgenv().hugemode["All Huges Normal"] or {
+            strategy = "-2%",
+            sell = true
+        }
+    end
+    
+    -- Luôn bán tất cả pet Huge
+    hugeConfig.sell = true
+    
+    -- Tính giá an toàn
+    local calculatedPrice, strategyDescription
+    local ok = pcall(function()
+        calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy)
+    end)
+    
+    if not ok or not calculatedPrice then
+        calculatedPrice = math.floor(rap * 0.98) -- Mặc định giảm 2%
+        strategyDescription = "-2%"
+    end
+    
+    -- Bỏ qua giới hạn giá, sử dụng trực tiếp giá đã tính
+    local finalPrice = calculatedPrice
+    
+    -- Debug thông tin tính giá nếu cần
+    if getgenv().Config["Debug Mode"] then
+        pcall(function()
+            debugPrice(petData.id, rap, calculatedPrice, strategyDescription, finalPrice)
+        end)
+    end
+    
+    -- Kiểm tra giá hợp lệ
+    if finalPrice <= 0 then
+        finalPrice = CONSTANTS.DEFAULT_RAP_HUGE / 2 -- Mặc định nếu giá sai
+        print("⚠️ Giá không hợp lệ cho " .. petData.id .. ", dùng mặc định")
+    end
+    
+    -- Tính số lượng tối đa có thể bán
+    local maxAmount = math.min(
+        petData._am or 1, 
+        CONSTANTS.MAX_LISTING_AMOUNT, 
+        math.floor(CONSTANTS.MAX_LISTING_VALUE / finalPrice)
+    )
+    
+    if maxAmount <= 0 then maxAmount = 1 end
+    
+    print("🏷️ Đang bán " .. petData.id .. " với giá " .. finalPrice)
+    
+    -- Tạo listing an toàn
+    local success, result = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(finalPrice), maxAmount)
+    end)
+    
+    if success and result then
+        -- Lưu thông tin chi tiết về Huge pet đã listing
+        listedItems[uuid] = {
+            isHuge = true,
+            id = petData.id,
+            class = "Pet",
+            price = finalPrice,
+            data = petData,
+            time = os.time()
+        }
+        usedSlots = usedSlots + 1
+        hugesSold = hugesSold + 1
+        print("✅ ĐÃ LIST PET HUGE: " .. petData.id .. " với giá " .. finalPrice .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        
+        -- Gửi webhook khi list Huge pet thành công
+        if getgenv().Config["Enable Webhook Notifications"] then
+            SendWebhookSold(petData.id, "Pet", finalPrice, petData, true, false)
+        end
+        
+        return true
+    else
+        warn("❌ KHÔNG THỂ BÁN PET: " .. tostring(result or "Lỗi không xác định"))
+        return false
+    end
+end
+
+-- Hàm tạo listing cho vật phẩm
+local function createItemListing(uuid, itemId, itemClass, amount, rap)
+    -- Kiểm tra xem đã list item này chưa
+    if listedItems[uuid] then return false end
+    
+    -- Kiểm tra xem còn slot trống không
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("Đã đạt giới hạn " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        return false
+    end
+    
+    local price = 0
+    -- Kiểm tra xem có cấu hình cho item này không
+    if getgenv().item[itemId] then
+        price = math.floor(rap * (getgenv().item[itemId] / 100))
+    else
+        return false
+    end
+    
+    -- Đảm bảo giá hợp lệ
+    if price <= 0 then
+        price = rap / 2 -- Mặc định nửa giá RAP
+        print("⚠️ Giá không hợp lệ cho " .. itemId .. ", dùng nửa giá RAP")
+    end
+    
+    -- Tính số lượng tối đa
+    local listingAmount = math.min(amount, CONSTANTS.MAX_LISTING_AMOUNT, math.floor(CONSTANTS.MAX_LISTING_VALUE / price))
+    if listingAmount <= 0 then listingAmount = 1 end
+    
+    -- Tạo listing
+    local success, result = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(price), listingAmount)
+    end)
+    
+    if success and result then
+        -- Lưu thông tin chi tiết về item đã listing
+        listedItems[uuid] = {
+            isHuge = false,
+            id = itemId,
+            class = itemClass,
+            price = price,
+            data = {id = itemId, _am = listingAmount},
+            time = os.time()
+        }
+        usedSlots = usedSlots + 1
+        normalItemsSold = normalItemsSold + 1
+        print("✅ Đã list item: " .. itemId .. " với giá " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        
+        -- Gửi webhook khi list item thành công
+        if getgenv().Config["Enable Webhook Notifications"] then
+            SendWebhookSold(itemId, itemClass, price, {id = itemId}, false, false)
+        }
+        
+        return true
+    else
+        warn("❌ Không thể bán vật phẩm: " .. tostring(result or "Lỗi không xác định"))
+        return false
+    end
+end
+
+-- Hàm quét tất cả pet Huge và sắp xếp chúng
+local function scanAndSortHugePets()
+    local normalHuges = {}
+    local otherHuges = {}
+    local totalHuges = 0
+    
+    -- Quét tất cả pet trong inventory
+    for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+        if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+            totalHuges = totalHuges + 1
+            
+            -- Lấy RAP từ cache hoặc tính mới
+            local rap = GetRap("Pet", PetData)
+            if rap <= 0 then rap = CONSTANTS.DEFAULT_RAP_HUGE end
+            
+            local typeString = getHugeType(PetData.id, PetData)
+            local hugeInfo = {
+                UUID = PetId,
+                Item = PetData,
+                Class = "Pet",
+                Rap = rap,
+                Type = "Huge",
+                HugeType = typeString
+            }
+            
+            -- Phân loại theo kiểu
+            if typeString == "All Huges Normal" then
+                table.insert(normalHuges, hugeInfo)
+                if getgenv().Config["Debug Mode"] then
+                    print("Tìm thấy Huge thường: " .. PetData.id .. " (RAP: " .. rap .. ")")
+                end
+            else
+                table.insert(otherHuges, hugeInfo)
+                if getgenv().Config["Debug Mode"] then
+                    print("Tìm thấy Huge đặc biệt: " .. PetData.id .. " (" .. typeString .. ", RAP: " .. rap .. ")")
+                end
+            end
+        end
+    end
+    
+    -- Sắp xếp cả hai danh sách theo RAP
+    local sortFunc
+    if getgenv().Config["Prioritize Low RAP"] then
+        sortFunc = function(a, b) return a.Rap < b.Rap end
+    else
+        sortFunc = function(a, b) return a.Rap > b.Rap end
+    end
+    
+    table.sort(normalHuges, sortFunc)
+    table.sort(otherHuges, sortFunc)
+    
+    -- Gộp danh sách với thứ tự Huge thường trước
+    local result = {}
+    for _, pet in ipairs(normalHuges) do table.insert(result, pet) end
+    for _, pet in ipairs(otherHuges) do table.insert(result, pet) end
+    
+    print("Đã tìm thấy " .. totalHuges .. " pet Huge (" .. #normalHuges .. " thường, " .. #otherHuges .. " đặc biệt)")
+    
+    return result, totalHuges
+end
+
+-- Hàm tìm và chọn server tốt nhất để hop
+local function findBestServer()
+    local servers = {}
+    local preferredPlayerCount = {10, 15, 20, 25} -- Ưu tiên server có số người chơi này
+    
+    local success, result = pcall(function()
+        local req = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+        return req
+    end)
+    
+    if not success or not result or not result.data then
+        warn("❌ Không thể lấy thông tin server, thử lại...")
+        return nil
+    end
+    
+    -- Lọc server có thể tham gia
+    for _, server in ipairs(result.data) do
+        if server.playing < server.maxPlayers and server.id ~= game.JobId then
+            table.insert(servers, server)
+        end
+    end
+    
+    if #servers == 0 then
+        print("⚠️ Không tìm thấy server phù hợp để hop")
+        return nil
+    end
+    
+    -- Tìm server gần với số lượng người chơi tối ưu
+    local bestServer = nil
+    local bestScore = -1
+    
+    for _, server in ipairs(servers) do
+        local playerScore = 0
+        -- Ưu tiên server có số người chơi trong khoảng tối ưu
+        for _, targetCount in ipairs(preferredPlayerCount) do
+            local diff = math.abs(server.playing - targetCount)
+            if diff < 5 then -- Nếu chênh lệch ít hơn 5 người
+                playerScore = 10 - diff -- Server gần với số người mong muốn sẽ có điểm cao
+                break
+            end
+        end
+        
+        -- Cũng ưu tiên server có ping thấp (nếu có)
+        local pingScore = 0
+        if server.ping then
+            pingScore = 100 - math.min(server.ping, 100) -- Ping thấp hơn = điểm cao hơn
+        end
+        
+        local totalScore = playerScore + (pingScore / 10) -- Ping ít quan trọng hơn số người chơi
+        
+        if totalScore > bestScore then
+            bestScore = totalScore
+            bestServer = server
+        end
+    end
+    
+    -- Nếu không tìm được server tối ưu, chọn một server ngẫu nhiên
+    if not bestServer then
+        bestServer = servers[math.random(1, #servers)]
+    end
+    
+    return bestServer.id
+end
+
+-- Thêm theo dõi khi có người mua từ gian hàng
+Network.Fired("Booths_Bought"):Connect(function(data)
+    -- Nếu có ai đó mua từ gian hàng của bạn
+    if data and data.booth and data.booth.owned and data.uid then
+        -- Kiểm tra xem vật phẩm bán ra có trong danh sách đã listing không
+        local itemInfo = listedItems[data.uid]
+        if itemInfo then
+            -- Gọi hàm webhook với thông tin đã lưu trữ
+            if getgenv().Config["Enable Webhook Notifications"] then
+                SendWebhookSold(itemInfo.id, itemInfo.class, itemInfo.price, itemInfo.data, itemInfo.isHuge, true)
+            end
+            
+            -- Cập nhật thống kê
+            if itemInfo.isHuge then
+                hugesSold = hugesSold + 1
+                print("🔔 Có người đã mua HUGE PET: " .. itemInfo.id .. " từ gian hàng của bạn với giá " .. Formatint(itemInfo.price))
+            else
+                normalItemsSold = normalItemsSold + 1
+                print("🔔 Có người đã mua ITEM: " .. itemInfo.id .. " từ gian hàng của bạn với giá " .. Formatint(itemInfo.price))
+            end
+            
+            -- Xóa khỏi danh sách đã liệt kê
+            listedItems[data.uid] = nil
+            usedSlots = usedSlots - 1
+        end
+    end
+end)
+
+-- Để sửa lỗi không tự động thêm khi slot giảm, thêm logic theo dõi slot và tự động bổ sung
+task.spawn(function()
+    local lastSlotCount = 0
+    
+    while task.wait(3) do -- Kiểm tra mỗi 3 giây
+        local success, err = pcall(function()
+            if getCurrentLocation() ~= "TRADING_PLAZA" then
+                return
+            end
+            
+            -- Nếu không có booth, đợi
+            if not currentBooth then
+                return
+            end
+            
+            -- Đếm slot hiện tại
+            local currentSlotCount = 0
+            for _, child in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+                if child:IsA("Frame") then
+                    currentSlotCount = currentSlotCount + 1
+                end
+            end
+            
+            -- Nếu slot giảm, có nghĩa là có người mua
+            if lastSlotCount > 0 and currentSlotCount < lastSlotCount then
+                local soldCount = lastSlotCount - currentSlotCount
+                print("📊 Phát hiện " .. soldCount .. " slot đã bán! Đang bổ sung ngay...")
+                
+                -- Reset listedItems cho slot đã bán
+                listedItems = {}
+                usedSlots = currentSlotCount
+                
+                -- Tìm Huge để thêm vào
+                local petsToAdd = {}
+                local count = 0
+                
+                for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+                    if string.find(PetData.id, "Huge") and not listedItems[PetId] and count < soldCount then
+                        table.insert(petsToAdd, {UUID = PetId, Item = PetData})
+                        count = count + 1
+                    end
+                end
+                
+                -- Thêm các pet mới vào booth
+                for _, petInfo in ipairs(petsToAdd) do
+                    task.wait(1) -- Đợi 1 giây giữa các lần tạo listing
+                    createHugeListing(petInfo.UUID, petInfo.Item)
+                end
+            end
+            
+            -- Cập nhật số slot cho lần kiểm tra tiếp theo
+            lastSlotCount = currentSlotCount
+        end)
+        
+        if not success and err then
+            warn("Lỗi theo dõi slot: " .. tostring(err))
+        end
+    end
+end)
+
+-- Server hopping cải tiến - CHỈ HOP TRƯỚC KHI BÁN
+spawn(function()
+    while true do
+        local currentTime = os.time()
+        local timeElapsed = currentTime - lastHopTime
+        
+        -- Kiểm tra xem đã đến thời gian hop server chưa
+        if timeElapsed >= CONSTANTS.HOP_SERVER_TIME then
+            print("⏳ Đã đến thời gian hop server...")
+            
+            if getCurrentLocation() == "TRADING_PLAZA" then
+                print("🔄 Đang chuẩn bị hop server sau 60 phút...")
+                
+                -- KHÔNG xóa tất cả listing hiện tại trước khi hop
+                print("⚠️ Giữ nguyên tất cả listing hiện tại khi hop server")
+                
+                -- Tìm server tốt nhất để hop
+                local targetServer = findBestServer()
+                
+                if targetServer then
+                    print("✅ Đã tìm thấy server mới, đang hop...")
+                    task.wait(2) -- Đợi một chút để đảm bảo các thao tác trước đó hoàn tất
+                    
+                    -- Thử teleport đến server mới
+                    local success = pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer)
+                    end)
+                    
+                    if not success then
+                        print("❌ Hop server thất bại, thử lại sau...")
+                    end
+                else
+                    print("⚠️ Không tìm thấy server phù hợp, sẽ thử lại sau...")
+                end
+            end
+            
+            -- Cập nhật thời gian hop gần nhất
+            lastHopTime = currentTime
+            task.wait(60) -- Đợi ít nhất 1 phút trước khi kiểm tra lại
+        else
+            -- Hiển thị thời gian còn lại cho lần hop tiếp theo nếu bật debug
+            if getgenv().Config["Debug Mode"] then
+                local remainingTime = CONSTANTS.HOP_SERVER_TIME - timeElapsed
+                local minutes = math.floor(remainingTime / 60)
+                local seconds = remainingTime % 60
+                
+                if minutes % 10 == 0 and seconds < 10 then -- Chỉ hiển thị mỗi 10 phút
+                    print(string.format("🕒 Thời gian còn lại đến lần hop server tiếp theo: %02d:%02d", minutes, seconds))
+                end
+            end
+            
+            task.wait(60) -- Kiểm tra mỗi phút
+        end
+    end
+end)
+
+-- Logic teleport và chiếm gian hàng (đã cải tiến)
+spawn(function()
+    while task.wait(5) do
+        local currentLocation = getCurrentLocation()
+        print("Vị trí hiện tại: " .. currentLocation)
+        
+        -- Nếu không ở Trading Plaza, teleport đến đó
+        if currentLocation ~= "TRADING_PLAZA" then
+            print("Không ở Trading Plaza, đang teleport...")
+            teleportToTradingPlaza()
+        else
+            -- Đợi nhân vật load
+            if not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+                task.wait(1)
+                continue
+            end
+            
+            -- Chiếm gian hàng
+            if not currentBooth then
+                print("Đang thử chiếm gian hàng...")
+                occupyBooth()
+            end
+        end
+    end
+end)
+
+-- Gửi kim cương
+spawn(function()
+    while task.wait(30) do
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        -- Chỉ gửi nếu đã cấu hình
+        if targetUser and targetUser ~= "" then
+            sendGems()
+        else
+            -- Thông báo một lần
+            print("Đã bỏ qua gửi kim cương do chưa cấu hình")
+            break -- Thoát khỏi vòng lặp nếu không cấu hình
+        end
+    end
+end)
+
+-- Thêm thông tin thống kê định kỳ
+spawn(function()
+    while true do
+        task.wait(60) -- Mỗi phút hiển thị thống kê một lần
+        
+        print("===== THỐNG KÊ SCRIPT =====")
+        print("⏱️ Thời gian chạy: " .. getElapsedTimeString())
+        print("🐾 Tổng số pet Huge trong kho: " .. totalhuge)
+        print("📋 Số pet Huge đã listing: " .. hugesSold)
+        print("🧩 Số vật phẩm thường đã listing: " .. normalItemsSold)
+        print("🎮 Slot sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+        print("============================")
+        
+        -- Thông báo đặc biệt về cấu hình không xóa listing
+        print("⚠️ LƯU Ý: Script đã được cấu hình để KHÔNG xóa listing")
+        print("👉 Khi đầy slot, script sẽ đợi đến khi có slot trống")
+        print("👉 Khi hop server, các pet đã listing sẽ được giữ nguyên")
+    end
+end)
+
+-- Main loop - Tạo listings
+spawn(function()
+    while true do
+        task.wait(10)
+        
+        if getCurrentLocation() ~= "TRADING_PLAZA" then
+            print("Không ở Trading Plaza, đợi...")
+            task.wait(5)
+            continue
+        end
+        
+        -- Kiểm tra xem có gian hàng không
+        if not currentBooth then
+            print("Không tìm thấy gian hàng, đang tìm...")
+            occupyBooth()
+            if not currentBooth then
+                print("Không tìm thấy gian hàng, đang thử lại...")
+                task.wait(5)
+                continue
+            end
+        end
+        
+        -- Cập nhật số slot đã sử dụng
+        usedSlots = countUsedBoothSlots()
+        print("Hiện tại đang sử dụng: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+        
+        -- Kiểm tra xem đã đầy slot chưa - SỬA LỖI: KHÔNG XÓA KHI ĐẦY SLOT
+        if usedSlots >= MAX_BOOTH_SLOTS then
+            print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng, đợi đến khi có slot trống")
+            task.wait(30) -- Đợi 30 giây trước khi kiểm tra lại
+            continue
+        end
+        
+        -- Tạo danh sách vật phẩm để list
+        local BoothQueue = {}
+
+        -- Thêm tất cả pet Huge vào hàng đợi, phân loại rõ ràng
+        print("Đang quét pet Huge...")
+        local normalHuges = {}
+        local otherHuges = {}
+
+        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+            if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+                -- Thử tính RAP, nếu lỗi vẫn thêm vào với RAP mặc định
+                local rap = 0
+                pcall(function()
+                    rap = GetRap("Pet", PetData)
+                end)
+                
+                if rap <= 0 then rap = 10000000 end -- 10M nếu không tính được
+                
+                local typeString = getHugeType(PetData.id, PetData)
+                local hugeInfo = {
+                    UUID = PetId,
+                    Item = PetData,
+                    Class = "Pet",
+                    Rap = rap,
+                    Type = "Huge",
+                    HugeType = typeString
+                }
+                
+                -- Phân loại Huge thường và Huge đặc biệt
+                if typeString == "All Huges Normal" then
+                    table.insert(normalHuges, hugeInfo)
+                    print("Đã tìm thấy Huge thường: " .. PetData.id .. " (RAP: " .. rap .. ")")
+                else
+                    table.insert(otherHuges, hugeInfo)
+                    print("Đã tìm thấy Huge đặc biệt: " .. PetData.id .. " (" .. typeString .. ", RAP: " .. rap .. ")")
+                end
+            end
+        end
+
+        -- Sắp xếp Huge thường theo RAP
+        if getgenv().Config["Prioritize Low RAP"] then
+            table.sort(normalHuges, function(a, b) return a.Rap < b.Rap end)
+            print("Sắp xếp Huge thường theo RAP tăng dần")
+        else
+            table.sort(normalHuges, function(a, b) return a.Rap > b.Rap end)
+            print("Sắp xếp Huge thường theo RAP giảm dần")
+        end
+
+        -- Sắp xếp Huge đặc biệt theo RAP
+        if getgenv().Config["Prioritize Low RAP"] then
+            table.sort(otherHuges, function(a, b) return a.Rap < b.Rap end)
+            print("Sắp xếp Huge đặc biệt theo RAP tăng dần")
+        else
+            table.sort(otherHuges, function(a, b) return a.Rap > b.Rap end)
+            print("Sắp xếp Huge đặc biệt theo RAP giảm dần")
+        end
+
+        -- Thêm tất cả Huge thường vào hàng đợi trước
+        for _, hugeInfo in ipairs(normalHuges) do
+            table.insert(BoothQueue, hugeInfo)
+        end
+
+        -- Sau đó thêm tất cả Huge đặc biệt
+        for _, hugeInfo in ipairs(otherHuges) do
+            table.insert(BoothQueue, hugeInfo)
+        end
+
+        print("Đã sắp xếp " .. #normalHuges .. " Huge thường và " .. #otherHuges .. " Huge đặc biệt để bán")
+
+        -- Thêm vật phẩm thường vào hàng đợi (chỉ khi ít pet Huge)
+        if #BoothQueue < 5 then
+            for Class, Items in pairs(Savemod.Get().Inventory) do
+                if Class == "Pet" then continue end -- Xử lý pet riêng
+                
+                for ItemId, ItemData in pairs(Items) do
+                    local amount = ItemData._am or 1
+                    if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
+                        local rap = 0
+                        pcall(function() 
+                            rap = GetRap(Class, ItemData) 
+                        end)
+                        
+                        if rap <= 0 then rap = 100000 end -- 100k nếu không tính được
+                        
+                        table.insert(BoothQueue, {
+                            UUID = ItemId,
+                            Item = ItemData,
+                            Class = Class,
+                            Rap = rap,
+                            Type = "Normal"
+                        })
+                    end
+                end
+            end
+        end
+        
+        -- Nếu không tìm thấy pet Huge, kiểm tra tất cả pet
+        if #BoothQueue == 0 then
+            print("Không tìm thấy pet Huge, kiểm tra tất cả pet khác...")
+            for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+                if not listedItems[PetId] then
+                    -- Tính RAP nếu được, nếu không thì dùng giá mặc định
+                    local rap = 0
+                    pcall(function()
+                        rap = GetRap("Pet", PetData)
+                    end)
+                    
+                    if rap > 0 then
+                        table.insert(BoothQueue, {
+                            UUID = PetId,
+                            Item = PetData,
+                            Class = "Pet",
+                            Rap = rap,
+                            Type = "Normal Pet"
+                        })
+                    end
+                end
+            end
+        end
+        
+        -- Tính toán số lượng slot còn trống
+        local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
+        print("Có thể thêm tối đa " .. remainingSlots .. " vật phẩm vào gian hàng")
+        
+        -- Giới hạn số lượng vật phẩm sẽ được thêm vào
+        local itemsToAdd = math.min(remainingSlots, #BoothQueue)
+        if itemsToAdd == 0 then
+            print("Không có vật phẩm mới để thêm vào gian hàng")
+            task.wait(60) -- Đợi 1 phút trước khi kiểm tra lại
+            continue
+        end
+        
+        print("Đang thêm " .. itemsToAdd .. " vật phẩm vào gian hàng...")
+        
+        -- Đặt thời gian chờ giữa các lần listing
+        local waitTimeBetweenListings = 1
+        
+        -- Tạo listing theo thứ tự ưu tiên, chỉ cho đến khi đầy slot
+        for i = 1, itemsToAdd do
+            local ItemInfo = BoothQueue[i]
+            
+            -- Dừng nếu đã đầy slot
+            if usedSlots >= MAX_BOOTH_SLOTS then
+                print("Đã sử dụng đủ " .. MAX_BOOTH_SLOTS .. " slot gian hàng")
+                break
+            end
+            
+            if ItemInfo.Type == "Huge" then
+                createHugeListing(ItemInfo.UUID, ItemInfo.Item)
+            else
+                createItemListing(ItemInfo.UUID, ItemInfo.Item.id, ItemInfo.Class, ItemInfo.Item._am or 1, ItemInfo.Rap)
+            end
+            task.wait(waitTimeBetweenListings) -- Đợi giữa các listing để tránh rate limit
+        end
+    end
+end)
+
+-- In thông tin vị trí khởi động
+print("Vị trí khi khởi động: " .. getCurrentLocation())
+print("Script đã khởi động thành công với icon Trading Plaza: " .. TRADING_PLAZA_ICON)
+print("Đã cấu hình ưu tiên bán pet Huge theo RAP từ thấp đến cao")
