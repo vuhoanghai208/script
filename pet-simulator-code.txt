@@ -1096,9 +1096,116 @@ local function createItemListing(uuid, itemId, itemClass, amount, rap)
     end
 end
 
--- Enhanced sale detection system
+-- New function to immediately add a new item after a sale
+local function addItemAfterSale()
+    if getCurrentLocation() ~= "TRADING_PLAZA" or not currentBooth then
+        return false
+    end
+    
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("✅ Booth is already full, no need to add items")
+        return false
+    end
+    
+    print("🔄 Adding new item immediately after sale...")
+    
+    -- Create priority queue for items to add
+    local itemQueue = {}
+    
+    -- First try to find Huge pets to add
+    for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+        if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+            local rap = GetRap("Pet", PetData) or CONSTANTS.DEFAULT_RAP_HUGE
+            local priority = 1 -- Highest priority (lowest number)
+            
+            table.insert(itemQueue, {
+                UUID = PetId,
+                Item = PetData,
+                Class = "Pet",
+                Rap = rap,
+                Priority = priority
+            })
+            
+            -- Only need one Huge pet
+            if #itemQueue > 0 then
+                break
+            end
+        end
+    end
+    
+    -- If no Huge pet, check regular items
+    if #itemQueue == 0 then
+        for ItemClass, Items in pairs(Savemod.Get().Inventory) do
+            for ItemId, ItemData in pairs(Items) do
+                -- Skip already listed items
+                if listedItems[ItemId] then continue end
+                
+                local priority = 10 -- Lower priority than Huge pets
+                
+                -- Add item to queue
+                if ItemClass == "Pet" then
+                    local rap = GetRap("Pet", ItemData) or CONSTANTS.DEFAULT_RAP_NORMAL
+                    if rap > 100000 then -- Only list valuable pets
+                        table.insert(itemQueue, {
+                            UUID = ItemId,
+                            Item = ItemData,
+                            Class = ItemClass,
+                            Rap = rap,
+                            Priority = priority
+                        })
+                    end
+                elseif getgenv().item[ItemData.id] then
+                    local rap = GetRap(ItemClass, ItemData) or CONSTANTS.DEFAULT_RAP_NORMAL
+                    table.insert(itemQueue, {
+                        UUID = ItemId,
+                        Item = ItemData,
+                        Class = ItemClass,
+                        Rap = rap,
+                        Priority = priority
+                    })
+                end
+                
+                -- Only get a few items to speed up the process
+                if #itemQueue >= 3 then
+                    break
+                end
+            end
+            if #itemQueue >= 3 then
+                break
+            end
+        end
+    end
+    
+    -- Sort by priority
+    table.sort(itemQueue, function(a, b) return a.Priority < b.Priority end)
+    
+    -- Try to add one item
+    if #itemQueue > 0 then
+        local item = itemQueue[1]
+        local success = false
+        
+        if item.Class == "Pet" and string.find(item.Item.id, "Huge") then
+            success = createHugeListing(item.UUID, item.Item)
+        else
+            success = createItemListing(item.UUID, item.Item.id, item.Class, item.Item._am or 1, item.Rap)
+        end
+        
+        if success then
+            print("✅ Successfully added new item after sale: " .. item.Item.id)
+            return true
+        else
+            print("❌ Failed to add new item after sale")
+            return false
+        end
+    else
+        print("⚠️ No suitable items found to add after sale")
+        return false
+    end
+end
+
+-- Enhanced sale detection system with faster response time
 spawn(function()
-    while task.wait(3) do -- Check every 3 seconds
+    while task.wait(1) do -- Check every 1 second for faster sale detection
         if getCurrentLocation() ~= "TRADING_PLAZA" or not currentBooth then
             continue
         end
@@ -1129,21 +1236,26 @@ spawn(function()
             continue
         end
         
+        -- Flag to track if any items were sold
+        local itemSold = false
+        
         -- Check for items that were in booth but are now gone (sold)
         for uid, itemInfo in pairs(listedItems) do
             -- Item was in our tracking but is no longer in booth = SOLD
             if lastBoothItems[uid] and not currentBoothItems[uid] then
                 -- This item was sold!
-                if itemInfo and os.time() - lastCheckTime > 2 then -- Avoid false positives
+                if itemInfo and os.time() - lastCheckTime > 1 then -- Reduced time threshold
                     -- Log sale
                     print("📢 DETECTED SALE: " .. (itemInfo.id or "Unknown Item"))
                     
-                    -- Send webhook for sold item
+                    -- Send webhook IMMEDIATELY for sold item (high priority)
                     if getgenv().Config["Enable Webhook Notifications"] then
-                        pcall(function()
-                            SendWebhookSold(itemInfo.id, itemInfo.class, itemInfo.price, itemInfo.data, itemInfo.isHuge)
+                        task.spawn(function() -- Run in separate thread to avoid delays
+                            pcall(function()
+                                SendWebhookSold(itemInfo.id, itemInfo.class, itemInfo.price, itemInfo.data, itemInfo.isHuge)
+                            end)
+                            print("✅ Webhook sent for sold item: " .. itemInfo.id)
                         end)
-                        print("✅ Webhook sent for sold item: " .. itemInfo.id)
                     end
                     
                     -- Update statistics
@@ -1157,8 +1269,19 @@ spawn(function()
                     
                     -- Remove from listed items
                     listedItems[uid] = nil
+                    
+                    -- Set flag that an item was sold
+                    itemSold = true
                 end
             end
+        end
+        
+        -- If an item was sold, IMMEDIATELY try to add a new one
+        if itemSold then
+            task.spawn(function()
+                print("🔄 Sale detected - adding new item immediately")
+                addItemAfterSale()
+            end)
         end
         
         -- Update slot count to reflect real booth state
