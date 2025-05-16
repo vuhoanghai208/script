@@ -1,6 +1,6 @@
 -- Advanced Configuration
 getgenv().Config = {
-    ["Link Webhook"] = "", -- Discord webhook link
+    ["Link Webhook"] = "https://discord.com/api/webhooks/1321351496754925689/Yg48GjwP2EIL99m5THiG5Hpm3by3wVDPpzbQ0zLOw3cpTZoUJiMEBzesN-YpCI-dq4z0", -- Discord webhook link
     ["Webhook ID"] = "", -- Discord user ID to ping
     ["Hop sever"] = 60, -- minutes - fixed at 60 minutes
     
