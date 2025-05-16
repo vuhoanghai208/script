@@ -1,0 +1,1645 @@
+-- Advanced Configuration
+getgenv().Config = {
+    ["Link Webhook"] = "", -- Discord webhook link
+    ["Webhook ID"] = "", -- Discord user ID to ping
+    ["Hop sever"] = 60, -- minutes - fixed at 60 minutes
+    
+    -- Advanced customization
+    ["Prioritize Low RAP"] = true, -- Prioritize selling pets with low RAP first
+    ["Debug Mode"] = true, -- Display debug information
+    ["Randomize Price"] = true, -- Add randomness to price
+    ["Random Range"] = 0.5, -- Random percentage (+/- 0.5%)
+    ["Enable Webhook Notifications"] = true -- Enable/disable webhook notifications
+}
+
+-- Configuration strategy for selling each type of pet
+getgenv().hugemode = {
+    -- Can use negative numbers (-5) or strings ("-5%") for discounts
+    -- Can use positive numbers (10) or strings ("+10%") for price increases
+    ["All Huges Normal"] = { strategy = "-6%", sell = true },
+    ["All Huges Golden"] = { strategy = "-6%", sell = true },
+    ["All Huges Rainbow"] = { strategy = "-5%", sell = true },
+    ["All Huges Shiny"] = { strategy = "-7%", sell = true }
+}
+
+-- Configuration for selling items (not pets)
+getgenv().item = {
+    ["Hype Egg 2"] = 95,
+}
+
+-- Wait for game to load completely
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- Declare services and libraries
+local VirtualUser = game:GetService("VirtualUser")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local Library = ReplicatedStorage.Library
+local Client = Library.Client
+local RAPCmds = require(Client.RAPCmds)
+local Network = require(Client.Network)
+local Savemod = require(Client.Save)
+local Functions = require(ReplicatedStorage.Library.Functions)
+local Items = require(ReplicatedStorage.Library.Items.Types)
+
+-- Map IDs and icons
+local TRADING_PLAZA_ICON = "rbxassetid://15048276787" -- Official Trading Plaza icon
+local PLACE_IDS = {
+    MAIN_WORLD = 8737899170,
+    PLAZA_WORLD = 16498369169,
+    TRADING_PLAZA_1 = 15588442388,
+    TRADING_PLAZA_2 = 15502339080
+}
+
+-- Constants to avoid magic numbers
+local CONSTANTS = {
+    MAX_BOOTH_SLOTS = 25,
+    DEFAULT_RAP_HUGE = 10000000, -- 10M default for Huge pets
+    DEFAULT_RAP_NORMAL = 100000, -- 100K default for normal pets
+    MAX_LISTING_AMOUNT = 15000,
+    MAX_LISTING_VALUE = 25000000000, -- 25B
+    WAIT_BETWEEN_BOOTH_ATTEMPTS = 5, -- seconds
+    WAIT_BETWEEN_LISTINGS = 1, -- seconds
+    WAIT_BETWEEN_SCANS = 10, -- seconds
+    WAIT_IF_NO_ITEMS = 60, -- seconds
+    WAIT_GEMS_CHECK = 30, -- seconds
+    MAX_TELEPORT_ATTEMPTS = 3,
+    HOP_SERVER_TIME = 60 * 60, -- 60 minutes (3600 seconds)
+    ANTI_AFK_INTERVAL = 30 -- 30 seconds
+}
+
+-- Global variables for tracking
+local totalhuge = 0
+local listedItems = {}
+local currentBooth = nil
+local usedSlots = 0
+local MAX_BOOTH_SLOTS = CONSTANTS.MAX_BOOTH_SLOTS
+-- Add listing time calculation functionality
+local listingStartTime = os.time()
+-- Add variables to count Huge sold
+local hugesSold = 0
+local normalItemsSold = 0
+-- Add server hop time tracking variable
+local lastHopTime = os.time()
+-- Add variables for booth item tracking
+local lastBoothItems = {}
+local lastCheckTime = os.time()
+local boothItemsCache = {}
+-- Add tracking for 20-slot issue
+local stuckAt20SlotsTime = 0
+local forcedSlotAddAttempts = 0
+
+-- Function to create display interface
+local function createCounterGUI()
+    -- Create ScreenGui
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "HugeCounterGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+
+    -- Create main frame
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "CounterContainer"
+    mainFrame.Size = UDim2.new(0, 200, 0, 60)
+    mainFrame.Position = UDim2.new(0, 20, 0, 20)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    
+    -- Add corner rounding
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = mainFrame
+    
+    -- Create Huge Pets label
+    local hugeLabel = Instance.new("TextLabel")
+    hugeLabel.Name = "HugeCounter"
+    hugeLabel.Size = UDim2.new(1, -20, 0, 25)
+    hugeLabel.Position = UDim2.new(0, 10, 0, 5)
+    hugeLabel.BackgroundTransparency = 1
+    hugeLabel.Font = Enum.Font.GothamBold
+    hugeLabel.TextSize = 16
+    hugeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    hugeLabel.Text = "Huge Pets: Counting..."
+    hugeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hugeLabel.Parent = mainFrame
+    
+    -- Create Gems label
+    local gemsLabel = Instance.new("TextLabel")
+    gemsLabel.Name = "GemCounter"
+    gemsLabel.Size = UDim2.new(1, -20, 0, 25)
+    gemsLabel.Position = UDim2.new(0, 10, 0, 30)
+    gemsLabel.BackgroundTransparency = 1
+    gemsLabel.Font = Enum.Font.GothamBold
+    gemsLabel.TextSize = 16
+    gemsLabel.TextColor3 = Color3.fromRGB(85, 255, 255)
+    gemsLabel.Text = "Gems: Counting..."
+    gemsLabel.TextXAlignment = Enum.TextXAlignment.Left
+    gemsLabel.Parent = mainFrame
+    
+    return hugeLabel, gemsLabel
+end
+
+-- Create interface and get references to labels
+local hugeLabel, gemsLabel = createCounterGUI()
+
+-- FUNCTIONS FOR WEBHOOK --
+-- Number formatting function for webhook
+local function Formatint(int)
+    local Suffix = {"", "k", "M", "B", "T", "Qd", "Qn", "Sx", "Sp", "Oc", "No", "De", "UDe", "DDe", "TDe", "QdDe", "QnDe", "SxDe", "SpDe", "OcDe", "NoDe", "Vg", "UVg", "DVg", "TVg", "QdVg", "QnVg", "SxVg", "SpVg", "OcVg", "NoVg", "Tg", "UTg", "DTg", "TTg", "QdTg", "QnTg", "SxTg", "SpTg", "OcTg", "NoTg", "QdAg", "QnAg", "SxAg", "SpAg", "OcAg", "NoAg", "e141", "e144", "e147", "e150", "e153", "e156", "e159", "e162", "e165", "e168", "e171", "e174", "e177", "e180", "e183", "e186", "e189", "e192", "e195", "e198", "e201", "e204", "e207", "e210", "e213", "e216", "e219", "e222", "e225", "e228", "e231", "e234", "e237", "e240", "e243", "e246", "e249", "e252", "e255", "e258", "e261", "e264", "e267", "e270", "e273", "e276", "e279", "e282", "e285", "e288", "e291", "e294", "e297", "e300", "e303"}
+    local Index = 1
+    
+    if int < 999 then 
+        return int
+    end
+    while int >= 1000 and Index < #Suffix do
+        int = int / 1000
+        Index = Index + 1
+    end
+    return string.format("%.2f%s", int, Suffix[Index])
+end
+
+local function GetAsset(Id, pt)
+    local Asset = require(Library.Directory.Pets)[Id]
+    return string.gsub(Asset and (pt == 1 and Asset.goldenThumbnail or Asset.thumbnail) or "14976456685", "rbxassetid://", "")
+end
+
+local function GetStats(Cmds, Class, ItemTable)
+    return Cmds.Get({
+        Class = { Name = Class },
+        IsA = function(InputClass) return InputClass == Class end,
+        GetId = function() return ItemTable.id end,
+        StackKey = function()
+            return HttpService:JSONEncode({id = ItemTable.id, sh = ItemTable.sh, pt = ItemTable.pt, tn = ItemTable.tn})
+        end
+    }) or nil
+end
+
+-- Function to send webhook notification when an item/pet is sold
+local function SendWebhookSold(itemId, itemClass, price, itemData, isHuge)
+    -- Check if webhook is enabled
+    if not getgenv().Config["Enable Webhook Notifications"] or getgenv().Config["Link Webhook"] == "" then
+        return
+    end
+    
+    local success, result = pcall(function()
+        local pt = itemData.pt or 0
+        local sh = itemData.sh or false
+        
+        -- Get number of Huge pets remaining in inventory
+        local hugesRemaining = 0
+        pcall(function()
+            for _, pet in pairs(Savemod.Get().Inventory.Pet) do
+                if string.find(tostring(pet.id), "Huge") then
+                    hugesRemaining = hugesRemaining + 1
+                end
+            end
+        end)
+        
+        -- Get current gems
+        local currentGems = 0
+        pcall(function()
+            if game.Players.LocalPlayer:FindFirstChild("leaderstats") then
+                local diamonds = game.Players.LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")
+                if diamonds then
+                    currentGems = diamonds.Value
+                end
+            end
+        end)
+        
+        -- Get image and information
+        local Img
+        if itemClass == "Pet" then
+            Img = string.format("https://biggamesapi.io/image/%s", GetAsset(itemId, pt))
+        else
+            -- Try to get image for non-pet items
+            pcall(function()
+                local thumbnail = require(Library.Directory.Items)[itemId] and require(Library.Directory.Items)[itemId].thumbnail
+                if thumbnail then
+                    Img = string.gsub(thumbnail, "rbxassetid://", "https://biggamesapi.io/image/")
+                else
+                    Img = "https://biggamesapi.io/image/14976456685" -- Default image
+                end
+            end)
+        end
+        
+        local Version = ""
+        if itemClass == "Pet" then
+            Version = pt == 1 and "Golden " or pt == 2 and "Rainbow " or ""
+        end
+        
+        local ItemType = isHuge and "🔴 HUGE PET" or "🔵 ITEM"
+        local Title = string.format("||%s|| Successfully sold %s%s%s for %s gems", 
+            game.Players.LocalPlayer.Name, 
+            Version, 
+            sh and "Shiny " or "", 
+            itemId, 
+            Formatint(price))
+
+        -- Try to get Exist and RAP info
+        local Exist, Rap
+        pcall(function()
+            local ExistCmds = require(Client.ExistCountCmds)
+            Exist = GetStats(ExistCmds, itemClass, { id = itemId, pt = pt, sh = sh, tn = nil })
+            Rap = GetStats(RAPCmds, itemClass, { id = itemId, pt = pt, sh = sh, tn = nil })
+        end)
+
+        local Body = HttpService:JSONEncode({
+            content = getgenv().Config["Webhook ID"] ~= "" and string.format("<@%s>", getgenv().Config["Webhook ID"]) or "",
+            embeds = {
+                {
+                    title = Title,
+                    description = ItemType,
+                    color = isHuge and 16711680 or 255, -- Red for Huge, blue for normal items
+                    timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"), -- Fixed timestamp format
+                    thumbnail = { url = Img },
+                    fields = {
+                        { 
+                            name = "💰 Sale Information",
+                            value = string.format("🏷️ **Type**: `%s`\n💎 **Price**: `%s gems`\n💠 **RAP**: `%s`\n💫 **Exist**: `%s`", 
+                                itemClass,
+                                Formatint(price), 
+                                Formatint(Rap or 0), 
+                                Formatint(Exist or 0))
+                        },
+                        {
+                            name = "📊 Account Information",
+                            value = string.format("🐾 **Huge Pets Remaining**: `%s`\n💰 **Current Gems**: `%s`", 
+                                hugesRemaining, 
+                                Formatint(currentGems))
+                        }
+                    },
+                    footer = { text = "Auto Seller | " .. os.date("%d/%m/%Y %H:%M:%S") }
+                }
+            }
+        })
+        
+        request({
+            Url = getgenv().Config["Link Webhook"],
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = Body
+        })
+        
+        local logMessage = string.format("✅ Sent webhook for %s %s | Price: %s | Gems: %s",
+            isHuge and "HUGE PET" or "ITEM", 
+            itemId, 
+            Formatint(price), 
+            Formatint(currentGems))
+        print(logMessage)
+    end)
+    
+    if not success then
+        warn("❌ Webhook error: " .. tostring(result))
+    end
+end
+-- END OF WEBHOOK FUNCTIONS --
+
+-- Number formatting function with suffix
+local function formatNumber(num)
+    if num >= 1e12 then return string.format("%.1fT", num/1e12)
+    elseif num >= 1e9 then return string.format("%.1fB", num/1e9)
+    elseif num >= 1e6 then return string.format("%.1fM", num/1e6)
+    elseif num >= 1e3 then return string.format("%.1fK", num/1e3)
+    else return tostring(num) end
+end
+
+-- Improved function to count Huge Pets
+local function countHugePets()
+    local count = 0
+    local success, errorMsg = pcall(function()
+        -- Try multiple possible data structures
+        local save = Savemod.Get()
+        
+        -- Structure 1: Direct access to Inventory.Pet
+        if save and save.Inventory and save.Inventory.Pet then
+            for _, pet in pairs(save.Inventory.Pet) do
+                if typeof(pet) == "table" and pet.id and string.find(tostring(pet.id), "Huge") then
+                    count = count + 1
+                end
+            end
+            return
+        end
+        
+        -- Structure 2: Possible alternative location
+        if save and save.Pets then
+            for _, pet in pairs(save.Pets) do
+                if typeof(pet) == "table" and (pet.id or pet.n) then
+                    local petId = pet.id or pet.n or ""
+                    if string.find(tostring(petId), "Huge") then
+                        count = count + 1
+                    end
+                end
+            end
+            return
+        end
+        
+        -- Structure 3: Search all possible pet containers
+        for key, value in pairs(save or {}) do
+            if typeof(value) == "table" then
+                for _, possiblePet in pairs(value) do
+                    if typeof(possiblePet) == "table" and (possiblePet.id or possiblePet.n) then
+                        local petId = possiblePet.id or possiblePet.n or ""
+                        if string.find(tostring(petId), "Huge") then
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Cannot count Huge pets: " .. tostring(errorMsg))
+        return -1 -- Error indicator
+    end
+    
+    return count
+end
+
+-- Improved booth slot counting function
+local function countUsedBoothSlots()
+    local count = 0
+    local success, result = pcall(function()
+        if not currentBooth then return 0 end
+        
+        -- Primary counting method - check PetScroll frames
+        for _, child in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+            if child:IsA("Frame") and child.Name ~= "Template" and child.Visible then
+                count = count + 1
+            end
+        end
+        
+        -- Secondary verification - check UI if available
+        local localBoothUI = LocalPlayer.PlayerGui:FindFirstChild("BoothUI")
+        if localBoothUI then
+            local listingCount = localBoothUI:FindFirstChild("Frame") and 
+                               localBoothUI.Frame:FindFirstChild("MainWindow") and
+                               localBoothUI.Frame.MainWindow:FindFirstChild("Listings")
+            
+            if listingCount and listingCount.Text and listingCount.Text:match("%d+/%d+") then
+                local current, max = listingCount.Text:match("(%d+)/(%d+)")
+                if current and tonumber(current) then
+                    print("UI reports " .. current .. "/" .. max .. " slots used")
+                    -- Only use UI count if it's higher (more accurate)
+                    if tonumber(current) > count then
+                        count = tonumber(current)
+                    end
+                end
+            end
+        end
+        
+        -- Add validation check
+        if count > MAX_BOOTH_SLOTS then
+            print("⚠️ Warning: Counted " .. count .. " slots, capping at " .. MAX_BOOTH_SLOTS)
+            count = MAX_BOOTH_SLOTS
+        end
+        
+        print("📊 Slot count: Direct count = " .. count)
+        return count
+    end)
+    
+    if not success then
+        warn("Error counting booth slots: " .. tostring(result))
+        -- Default to a conservative number to encourage adding more items
+        return usedSlots - 3 > 0 and usedSlots - 3 or 0
+    end
+    
+    return count
+end
+
+-- Add this new function to force add more listings when stuck at 20
+local function forceAddMoreListings()
+    if usedSlots < MAX_BOOTH_SLOTS and usedSlots > 0 then
+        print("🔄 Forcing addition of more listings to fill all 25 slots")
+        
+        -- Scan for more pets to add
+        local additionalPets = {}
+        for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+            if not listedItems[PetId] then
+                -- Any pet, not just Huge
+                table.insert(additionalPets, {
+                    UUID = PetId,
+                    Item = PetData,
+                    Class = "Pet"
+                })
+                
+                -- Only need enough to fill remaining slots
+                if #additionalPets >= (MAX_BOOTH_SLOTS - usedSlots + 5) then -- Add a few extra to be safe
+                    break
+                end
+            end
+        end
+        
+        -- Add these pets to fill remaining slots
+        local addedCount = 0
+        for _, pet in ipairs(additionalPets) do
+            if usedSlots >= MAX_BOOTH_SLOTS then
+                break
+            end
+            
+            if string.find(pet.Item.id, "Huge") then
+                if createHugeListing(pet.UUID, pet.Item) then
+                    addedCount = addedCount + 1
+                end
+            else
+                -- Try to create listing for normal pet with default price
+                pcall(function()
+                    local rap = GetRap("Pet", pet.Item) or 100000
+                    local price = math.floor(rap * 0.9) -- 90% of RAP
+                    
+                    local success = Network.Invoke("Booths_CreateListing", pet.UUID, math.ceil(price), 1)
+                    if success then
+                        listedItems[pet.UUID] = {
+                            isHuge = false,
+                            id = pet.Item.id,
+                            class = "Pet",
+                            price = price,
+                            data = pet.Item,
+                            time = os.time()
+                        }
+                        usedSlots = usedSlots + 1
+                        addedCount = addedCount + 1
+                        print("✅ Force added normal pet: " .. pet.Item.id)
+                    end
+                end)
+            end
+            
+            task.wait(0.5) -- Brief wait between listings
+        end
+        
+        print("📈 Force added " .. addedCount .. " more pets - now using " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slots")
+        forcedSlotAddAttempts = forcedSlotAddAttempts + 1
+        return addedCount > 0
+    end
+    
+    return false
+end
+
+-- Add this reset function to ensure accurate slot counts
+local function resetBoothItemTracking()
+    usedSlots = 0
+    listedItems = {}
+    -- Force recount
+    task.wait(1)
+    usedSlots = countUsedBoothSlots()
+    print("🔄 Reset booth tracking - Current slots: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+    return usedSlots
+end
+
+-- Update counters
+spawn(function()
+    while task.wait(2) do
+        -- Count Huge Pets
+        local hugeCount = countHugePets()
+        if hugeCount >= 0 then
+            hugeLabel.Text = "Huge Pets: " .. formatNumber(hugeCount)
+            -- Update global variable
+            totalhuge = hugeCount
+        else
+            hugeLabel.Text = "Huge Pets: 0"
+            warn("Using default value for Huge Pets counter")
+        end
+        
+        -- Count Gems
+        local gemCount = 0
+        local success, gemErr = pcall(function()
+            if game.Players.LocalPlayer:FindFirstChild("leaderstats") then
+                local diamonds = game.Players.LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")
+                if diamonds then
+                    gemCount = diamonds.Value
+                end
+            end
+        end)
+        
+        if success then
+            gemsLabel.Text = "Gems: " .. formatNumber(gemCount)
+        else
+            gemsLabel.Text = "Gems: 0"
+            warn("Error counting Gems: " .. tostring(gemErr))
+        end
+    end
+end)
+
+-- Debug price function to identify issues (simplified)
+local function debugPrice(petId, originalRap, calculatedPrice, strategy, finalPrice)
+    if not getgenv().Config["Debug Mode"] then return end
+    
+    print("===== DEBUG PRICE CALCULATION =====")
+    print("Pet ID: " .. petId)
+    print("Original RAP: " .. originalRap)
+    print("Strategy: " .. strategy)
+    print("Calculated Price: " .. calculatedPrice)
+    print("==================================")
+end
+
+local function getElapsedTimeString()
+    local elapsedSeconds = os.time() - listingStartTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+-- Advanced Anti-AFK
+-- Disable IdleEvent connections
+for _, v in pairs(getconnections(LocalPlayer.Idled)) do v:Disable() end
+
+-- Anti-AFK with multiple methods
+spawn(function()
+    while true do
+        task.wait(CONSTANTS.ANTI_AFK_INTERVAL)
+        
+        -- Method 1: VirtualUser ClickButton
+        pcall(function()
+            VirtualUser:ClickButton2(Vector2.new(math.random(100, 900), math.random(100, 900)))
+        end)
+        
+        -- Method 2: CaptureController
+        pcall(function()
+            if game:GetService("VirtualInputManager") then
+                game:GetService("VirtualInputManager"):SendKeyEvent(true, "w", false, game)
+                task.wait(0.1)
+                game:GetService("VirtualInputManager"):SendKeyEvent(false, "w", false, game)
+            end
+        end)
+        
+        -- Method 3: Slight character movement
+        pcall(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                LocalPlayer.Character.Humanoid:ChangeState(11) -- Jump state
+                task.wait(0.1)
+            end
+        end)
+        
+        -- Method 4: Stop idle tracking timer
+        pcall(function()
+            Network.Fire("Idle Tracking: Stop Timer")
+        end)
+        
+        if getgenv().Config["Debug Mode"] then
+            print("🕒 Anti-AFK active...")
+        end
+    end
+end)
+
+-- Hook to prevent server closing or idle tracking
+local old
+old = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    if not checkcaller() then
+        local Name = tostring(self)
+        if table.find({"Server Closing", "Idle Tracking: Update Timer", "Move Server", "AFK Kick", "AFK Warning"}, Name) then
+            return nil
+        end
+    end
+    return old(self, ...)
+end)
+
+-- Wait for UI and leaderstats to be ready
+local function waitForGameReady()
+    local success, result = pcall(function()
+        -- Wait for UI and leaderstats
+        while not (game:IsLoaded() and
+               LocalPlayer:FindFirstChild("PlayerGui") and
+               not LocalPlayer.PlayerGui:FindFirstChild("__INTRO") and
+               LocalPlayer.PlayerGui:FindFirstChild("MainLeft") and
+               LocalPlayer.PlayerGui.MainLeft.Left.Currency.Diamonds.Diamonds.Visible == true and
+               not LocalPlayer:FindFirstChild("GUIFX Holder")) do
+            task.wait(0.5)
+        end
+        
+        -- Wait for leaderstats
+        local timeout = 30 -- seconds
+        local startTime = tick()
+        while not (LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")) do
+            if tick() - startTime > timeout then
+                warn("Timeout waiting for leaderstats['💎 Diamonds']")
+                return false
+            end
+            task.wait(0.5)
+        end
+        
+        return true
+    end)
+    
+    if not success or not result then
+        warn("Error waiting for game to be ready: " .. tostring(result))
+        return false
+    end
+    
+    return true
+end
+
+-- Wait for game to be ready
+if not waitForGameReady() then
+    warn("Game not ready, ending script")
+    return
+end
+
+print("Game ready, starting script")
+
+-- Function to check current location
+local function getCurrentLocation()
+    local currentPlaceId = game.PlaceId
+    
+    if currentPlaceId == PLACE_IDS.MAIN_WORLD then
+        return "MAIN_WORLD"
+    elseif currentPlaceId == PLACE_IDS.PLAZA_WORLD then
+        return "PLAZA_WORLD"
+    elseif currentPlaceId == PLACE_IDS.TRADING_PLAZA_1 or currentPlaceId == PLACE_IDS.TRADING_PLAZA_2 then
+        return "TRADING_PLAZA"
+    else
+        return "UNKNOWN_" .. tostring(currentPlaceId)
+    end
+end
+
+-- Advanced function to teleport to Trading Plaza
+local function teleportToTradingPlaza()
+    local currentLocation = getCurrentLocation()
+    print("Current location: " .. currentLocation)
+    
+    if currentLocation == "TRADING_PLAZA" then
+        print("Already in Trading Plaza, no need to teleport")
+        return true
+    end
+    
+    print("Teleporting to Trading Plaza...")
+    
+    -- Method 1: Using Network.Invoke
+    local success1 = pcall(function()
+        Network.Invoke("Travel to Trading Plaza")
+        print("Called Travel to Trading Plaza")
+        task.wait(5)
+    end)
+    
+    -- Check location after method 1
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Method 1 successful!")
+        return true
+    end
+    
+    -- Method 2: Find and use Trading Plaza portal
+    print("Method 1 failed, trying method 2...")
+    local success2 = pcall(function()
+        -- Find Trading Plaza portal in Castle area
+        local ZonesUtil = require(ReplicatedStorage.Library.Util.ZonesUtil)
+        local castleFolder = ZonesUtil.GetInteractFolder and ZonesUtil.GetInteractFolder("Castle")
+        
+        if castleFolder then
+            local portal = castleFolder:FindFirstChild("TradingPlazaPortal")
+            if portal and portal:FindFirstChild("InteractHolder") then
+                -- Teleport to portal position
+                local portalPos = portal.InteractHolder.Position
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(portalPos)
+                    task.wait(1)
+                    
+                    -- Interact with portal
+                    Network.Fire("Teleporting to Trading Plaza!")
+                    Network.Invoke("Travel to Trading Plaza")
+                    task.wait(3)
+                end
+            end
+        end
+    end)
+    
+    -- Check location after method 2
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        print("Method 2 successful!")
+        return true
+    end
+    
+    -- Method 3: Use TeleportService directly
+    print("Method 2 failed, trying method 3...")
+    local success3 = pcall(function()
+        TeleportService:Teleport(PLACE_IDS.TRADING_PLAZA_1)
+        task.wait(5)
+    end)
+    
+    print("Tried all teleport methods")
+    return (getCurrentLocation() == "TRADING_PLAZA")
+end
+
+-- Cache for RAP to avoid recalculation
+local rapCache = {}
+
+-- RAP calculation function with cache
+local function GetRap(itemClass, itemData)
+    -- Create key for cache
+    local cacheKey = itemClass .. "_" .. itemData.id
+    if itemData.sh then cacheKey = cacheKey .. "_shiny" end
+    if itemData.pt == 1 then cacheKey = cacheKey .. "_golden" end
+    if itemData.pt == 2 then cacheKey = cacheKey .. "_rainbow" end
+    
+    -- Check cache first
+    if rapCache[cacheKey] then
+        return rapCache[cacheKey]
+    end
+    
+    -- Calculate RAP if not in cache
+    local ok, result = pcall(function()
+        -- initialize item object
+        local itm = require(Library.Items[itemClass .. "Item"])(itemData.id)
+        if itemData.sh then itm:SetShiny(true) end
+        if itemData.pt == 1 then itm:SetGolden() end
+        if itemData.pt == 2 then itm:SetRainbow() end
+        return itm:GetRAP() or 0
+    end)
+    
+    if not ok then
+        warn("GetRap error:", result)
+        return 0
+    end
+    
+    -- Save to cache
+    rapCache[cacheKey] = result
+    return result
+end
+
+-- Function to claim booth
+local function occupyBooth()
+    local success, result = pcall(function()
+        -- Check if already have a booth
+        local HaveBooth = false
+        for _, Booth in ipairs(workspace.__THINGS.Booths:GetChildren()) do
+            if Booth:IsA("Model") and Booth:GetAttribute("Owner") == LocalPlayer.UserId then
+                HaveBooth = true
+                currentBooth = Booth
+                LocalPlayer.Character.HumanoidRootPart.CFrame = Booth.Table.CFrame * CFrame.new(5, 0, 0)
+                print("Found your booth!")
+                return true
+            end
+        end
+
+        if not HaveBooth then
+            -- Find nearest booth to claim
+            local pos, id
+            local distance = math.huge
+            local playerPos = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart.Position
+            if not playerPos then return false end
+
+            for _, v in pairs(workspace.TradingPlaza.BoothSpawns:GetChildren()) do
+                if v and v.WorldPivot then
+                    local boothPosition = v.WorldPivot.Position
+                    local currentDistance = (boothPosition - playerPos).Magnitude
+                    local boothId = v:GetAttribute("ID")
+                    if boothId and currentDistance < distance then
+                        distance = currentDistance
+                        pos = boothPosition
+                        id = boothId
+                    end
+                end
+            end
+
+            if pos and id then
+                LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(pos + Vector3.new(-5, 5, 0))
+                task.wait(0.5)
+                local claimSuccess = pcall(function()
+                    Network.Invoke("Booths_ClaimBooth", tostring(id))
+                end)
+                if claimSuccess then
+                    print("Claimed booth ID: " .. id)
+                    return true
+                else
+                    warn("Unable to claim booth")
+                    return false
+                end
+            else
+                warn("No nearby booth found!")
+                return false
+            end
+        end
+    end)
+    
+    if not success then
+        warn("Error claiming booth: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Function to send gems
+local function sendGems()
+    local success, result = pcall(function()
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        if targetUser == "" then
+            warn("Gem receiving account not configured")
+            return false
+        end
+        
+        local diamondThreshold = Functions.ParseNumberSmart(getgenv().Config["Gem"])
+        local currentDiamonds = LocalPlayer.leaderstats["💎 Diamonds"].Value
+        
+        if currentDiamonds >= diamondThreshold then
+            -- Find diamond ID
+            for i, v in pairs(Savemod.Get().Inventory.Currency) do
+                if v.id == "Diamonds" then
+                    -- Keep 1 billion gems
+                    local amountToSend = currentDiamonds - Functions.ParseNumberSmart("1b")
+                    
+                    -- Send gems
+                    local args = {
+                        [1] = targetUser,
+                        [2] = "Automatic send from script",
+                        [3] = "Currency",
+                        [4] = tostring(i),
+                        [5] = amountToSend
+                    }
+                    
+                    ReplicatedStorage.Network["Mailbox: Send"]:InvokeServer(unpack(args))
+                    print("Sent " .. tostring(amountToSend) .. " gems to " .. targetUser)
+                    return true
+                end
+            end
+            warn("Diamond ID not found")
+        end
+        
+        return false
+    end)
+    
+    if not success then
+        warn("Error sending gems: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- NOTE: This remove listing function will NOT be called automatically
+-- Keep this function only for reference, do not use
+local function removeAllListings_DISABLED()
+    print("⚠️ DO NOT AUTOMATICALLY REMOVE LISTINGS - THIS FUNCTION IS NOT USED")
+    return false
+end
+
+-- Function to determine Huge pet type
+local function getHugeType(petId, petData)
+    if petData.pt == 1 or string.find(petId, "Golden") then
+        return "All Huges Golden"
+    elseif petData.pt == 2 or string.find(petId, "Rainbow") then
+        return "All Huges Rainbow"
+    elseif petData.sh or string.find(petId, "Shiny") then
+        return "All Huges Shiny"
+    else
+        return "All Huges Normal"
+    end
+end
+
+-- Calculate price based on strategy (optimized)
+local function calculatePrice(rap, strategy)
+    -- Handle invalid strategy
+    if not strategy or strategy == "" then
+        strategy = "-2%" -- Default discount 2%
+    end
+    
+    -- Normalize strategy types
+    local multiplier = 1
+    local desc = strategy
+    
+    -- Handle special cases
+    if strategy == "market" then
+        -- Keep original price
+        multiplier = 1
+    elseif strategy == "auto" then
+        -- Automatically adjust based on used slots
+        local used = usedSlots / MAX_BOOTH_SLOTS
+        if used > 0.8 then 
+            multiplier = 0.9      -- 10% discount if using >80% slots
+        elseif used > 0.5 then 
+            multiplier = 0.95     -- 5% discount if using >50% slots
+        end
+    elseif type(strategy) == "string" then
+        -- Handle strings like "+10%" or "-2%"
+        local sign, pct = strategy:match("^([%+%-])([%d%.]+)%%$")
+        pct = tonumber(pct)
+        if sign and pct then
+            if sign == "+" then
+                multiplier = 1 + (pct/100)
+            elseif sign == "-" then
+                multiplier = 1 - (pct/100)
+            end
+        end
+    elseif type(strategy) == "number" then
+        -- Handle direct number
+        multiplier = 1 + (strategy/100)
+        desc = (strategy >= 0 and "+" or "") .. strategy .. "%"
+    end
+    
+    -- Calculate base price
+    local price = math.floor(rap * multiplier)
+    
+    -- Add randomness if enabled
+    if getgenv().Config["Randomize Price"] then
+        local range = getgenv().Config["Random Range"] / 100
+        local randomFactor = 1 + ((math.random() * 2 - 1) * range)
+        price = math.floor(price * randomFactor)
+    end
+    
+    return price, desc
+end
+
+-- Function to create listing for Huge pet (optimized)
+local function createHugeListing(uuid, petData)
+    -- Check if it's a Huge pet
+    if not string.find(petData.id, "Huge") then
+        return false
+    end
+    
+    print("📋 Processing pet: " .. petData.id)
+    
+    -- Get RAP from cache or calculate new
+    local rap = GetRap("Pet", petData)
+    if rap <= 0 then
+        rap = CONSTANTS.DEFAULT_RAP_HUGE
+        print("⚠️ Cannot calculate RAP for " .. petData.id .. ", using default: " .. CONSTANTS.DEFAULT_RAP_HUGE)
+    end
+
+    -- Get configuration based on pet type
+    local typeString = getHugeType(petData.id, petData)
+    local hugeConfig = getgenv().hugemode[typeString]
+    
+    -- Ensure always have valid configuration
+    if not hugeConfig then
+        hugeConfig = getgenv().hugemode["All Huges Normal"] or {
+            strategy = "-2%",
+            sell = true
+        }
+    end
+    
+    -- Always sell all Huge pets
+    hugeConfig.sell = true
+    
+    -- Calculate price safely
+    local calculatedPrice, strategyDescription
+    local ok = pcall(function()
+        calculatedPrice, strategyDescription = calculatePrice(rap, hugeConfig.strategy)
+    end)
+    
+    if not ok or not calculatedPrice then
+        calculatedPrice = math.floor(rap * 0.98) -- Default 2% discount
+        strategyDescription = "-2%"
+    end
+    
+    -- Skip price limit, use calculated price directly
+    local finalPrice = calculatedPrice
+    
+    -- Debug price calculation info if needed
+    if getgenv().Config["Debug Mode"] then
+        pcall(function()
+            debugPrice(petData.id, rap, calculatedPrice, strategyDescription, finalPrice)
+        end)
+    end
+    
+    -- Check for valid price
+    if finalPrice <= 0 then
+        finalPrice = CONSTANTS.DEFAULT_RAP_HUGE / 2 -- Default if price is wrong
+        print("⚠️ Invalid price for " .. petData.id .. ", using default")
+    end
+    
+    -- Calculate maximum amount that can be sold
+    local maxAmount = math.min(
+        petData._am or 1, 
+        CONSTANTS.MAX_LISTING_AMOUNT, 
+        math.floor(CONSTANTS.MAX_LISTING_VALUE / finalPrice)
+    )
+    
+    if maxAmount <= 0 then maxAmount = 1 end
+    
+    print("🏷️ Selling " .. petData.id .. " for " .. finalPrice)
+    
+    -- Create listing safely
+    local success, result = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(finalPrice), maxAmount)
+    end)
+    
+    if success and result then
+        -- Save detailed information about listed Huge pet
+        listedItems[uuid] = {
+            isHuge = true,
+            id = petData.id,
+            class = "Pet",
+            price = finalPrice,
+            data = petData,
+            time = os.time()
+        }
+        usedSlots = usedSlots + 1
+        hugesSold = hugesSold + 1
+        print("✅ LISTED HUGE PET: " .. petData.id .. " for " .. finalPrice .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        
+        return true
+    else
+        warn("❌ CANNOT SELL PET: " .. tostring(result or "Unknown error"))
+        return false
+    end
+end
+
+-- Function to create listing for items
+local function createItemListing(uuid, itemId, itemClass, amount, rap)
+    -- Check if already listed this item
+    if listedItems[uuid] then return false end
+    
+    -- Check if there are empty slots
+    if usedSlots >= MAX_BOOTH_SLOTS then
+        print("Reached limit of " .. MAX_BOOTH_SLOTS .. " booth slots")
+        return false
+    end
+    
+    local price = 0
+    -- Check if there's configuration for this item
+    if getgenv().item[itemId] then
+        price = math.floor(rap * (getgenv().item[itemId] / 100))
+    else
+        return false
+    end
+    
+    -- Ensure valid price
+    if price <= 0 then
+        price = rap / 2 -- Default half RAP price
+        print("⚠️ Invalid price for " .. itemId .. ", using half RAP price")
+    end
+    
+    -- Calculate maximum amount
+    local listingAmount = math.min(amount, CONSTANTS.MAX_LISTING_AMOUNT, math.floor(CONSTANTS.MAX_LISTING_VALUE / price))
+    if listingAmount <= 0 then listingAmount = 1 end
+    
+    -- Create listing
+    local success, result = pcall(function()
+        return Network.Invoke("Booths_CreateListing", uuid, math.ceil(price), listingAmount)
+    end)
+    
+    if success and result then
+        -- Save detailed information about listed item
+        listedItems[uuid] = {
+            isHuge = false,
+            id = itemId,
+            class = itemClass,
+            price = price,
+            data = {id = itemId, _am = listingAmount},
+            time = os.time()
+        }
+        usedSlots = usedSlots + 1
+        normalItemsSold = normalItemsSold + 1
+        print("✅ Listed item: " .. itemId .. " for " .. price .. " (Slot " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. ")")
+        
+        return true
+    else
+        warn("❌ Cannot sell item: " .. tostring(result or "Unknown error"))
+        return false
+    end
+end
+
+-- Enhanced sale detection system
+spawn(function()
+    while task.wait(3) do -- Check every 3 seconds
+        if getCurrentLocation() ~= "TRADING_PLAZA" or not currentBooth then
+            continue
+        end
+        
+        -- Get current items in booth
+        local currentBoothItems = {}
+        local foundItems = 0
+        
+        -- Build inventory of current booth items
+        pcall(function()
+            for _, child in pairs(currentBooth.Pets.BoothTop.PetScroll:GetChildren()) do
+                if child:IsA("Frame") and child.Name ~= "Template" and child.Visible then
+                    foundItems = foundItems + 1
+                    
+                    -- Try multiple methods to get UID
+                    local uid = child:GetAttribute("ItemUID") or child:GetAttribute("UID") or child.Name
+                    if uid then 
+                        currentBoothItems[tostring(uid)] = true
+                    end
+                end
+            end
+        end)
+        
+        -- No need to process if we just started
+        if table.count(lastBoothItems) == 0 then
+            lastBoothItems = currentBoothItems
+            lastCheckTime = os.time()
+            continue
+        end
+        
+        -- Check for items that were in booth but are now gone (sold)
+        for uid, itemInfo in pairs(listedItems) do
+            -- Item was in our tracking but is no longer in booth = SOLD
+            if lastBoothItems[uid] and not currentBoothItems[uid] then
+                -- This item was sold!
+                if itemInfo and os.time() - lastCheckTime > 2 then -- Avoid false positives
+                    -- Log sale
+                    print("📢 DETECTED SALE: " .. (itemInfo.id or "Unknown Item"))
+                    
+                    -- Send webhook for sold item
+                    if getgenv().Config["Enable Webhook Notifications"] then
+                        pcall(function()
+                            SendWebhookSold(itemInfo.id, itemInfo.class, itemInfo.price, itemInfo.data, itemInfo.isHuge)
+                        end)
+                        print("✅ Webhook sent for sold item: " .. itemInfo.id)
+                    end
+                    
+                    -- Update statistics
+                    if itemInfo.isHuge then
+                        hugesSold = hugesSold + 1
+                        print("🔔 Someone purchased a HUGE PET: " .. itemInfo.id .. " for " .. Formatint(itemInfo.price))
+                    else
+                        normalItemsSold = normalItemsSold + 1
+                        print("🔔 Someone purchased an ITEM: " .. itemInfo.id .. " for " .. Formatint(itemInfo.price))
+                    end
+                    
+                    -- Remove from listed items
+                    listedItems[uid] = nil
+                end
+            end
+        end
+        
+        -- Update slot count to reflect real booth state
+        usedSlots = foundItems
+        print("📊 Current booth status: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slots used")
+        
+        -- If we have too few items, trigger a reset
+        if usedSlots < 20 and os.time() - lastHopTime > 60 then
+            print("📉 Detected low item count (" .. usedSlots .. "), triggering booth refresh")
+            resetBoothItemTracking()
+        end
+        
+        -- Special detection for exactly 20 slots
+        if usedSlots == 20 then
+            if stuckAt20SlotsTime == 0 then
+                stuckAt20SlotsTime = os.time()
+                print("⚠️ Detected exactly 20/25 slots used - starting timer")
+            elseif os.time() - stuckAt20SlotsTime > 30 then -- Stuck for 30 seconds
+                print("🔄 Been stuck at exactly 20/25 slots for over 30 seconds - forcing fix")
+                forceAddMoreListings()
+                stuckAt20SlotsTime = 0 -- Reset timer
+            end
+        else
+            stuckAt20SlotsTime = 0 -- Reset if not at 20 slots
+        end
+        
+        -- Update tracking
+        lastBoothItems = currentBoothItems
+        lastCheckTime = os.time()
+    end
+end)
+
+-- Add monitoring for the 20-slot issue
+spawn(function()
+    while task.wait(15) do -- Check every 15 seconds
+        if getCurrentLocation() == "TRADING_PLAZA" and currentBooth then
+            local currentSlots = countUsedBoothSlots()
+            
+            -- If we detect exactly 20 slots being used for extended time
+            if currentSlots == 20 then
+                if stuckAt20SlotsTime == 0 then
+                    stuckAt20SlotsTime = os.time()
+                    print("⚠️ 20/25 slot issue detected - monitoring...")
+                elseif os.time() - stuckAt20SlotsTime > 30 then -- 30 seconds stuck at 20 slots
+                    print("🔧 FIXING 20/25 SLOT ISSUE - attempts so far: " .. forcedSlotAddAttempts)
+                    
+                    if forcedSlotAddAttempts < 5 then
+                        -- Try method 1: Force add more listings
+                        forceAddMoreListings()
+                    else
+                        -- Try method 2: Complete reset of booth tracking
+                        print("⚠️ Multiple attempts failed - performing complete booth reset")
+                        resetBoothItemTracking()
+                        forcedSlotAddAttempts = 0
+                    end
+                    
+                    stuckAt20SlotsTime = 0 -- Reset timer
+                    task.wait(5) -- Wait to see if fix worked
+                end
+            else
+                -- Reset tracking if not at 20 slots
+                stuckAt20SlotsTime = 0
+                
+                -- If we reached 25 slots, reset the attempt counter
+                if currentSlots == 25 then
+                    forcedSlotAddAttempts = 0
+                    print("✅ All 25 slots filled - reset attempt counter")
+                end
+            end
+        end
+    end
+end)
+
+-- Find best server to hop
+local function findBestServer()
+    local servers = {}
+    local preferredPlayerCount = {10, 15, 20, 25} -- Prefer servers with this player count
+    
+    local success, result = pcall(function()
+        local req = HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"))
+        return req
+    end)
+    
+    if not success or not result or not result.data then
+        warn("❌ Cannot get server information, trying again...")
+        return nil
+    end
+    
+    -- Filter joinable servers
+    for _, server in ipairs(result.data) do
+        if server.playing < server.maxPlayers and server.id ~= game.JobId then
+            table.insert(servers, server)
+        end
+    end
+    
+    if #servers == 0 then
+        print("⚠️ No suitable server found for hopping")
+        return nil
+    end
+    
+    -- Find server close to optimal player count
+    local bestServer = nil
+    local bestScore = -1
+    
+    for _, server in ipairs(servers) do
+        local playerScore = 0
+        -- Prefer servers with player count in optimal range
+        for _, targetCount in ipairs(preferredPlayerCount) do
+            local diff = math.abs(server.playing - targetCount)
+            if diff < 5 then -- If difference less than 5 players
+                playerScore = 10 - diff -- Server close to desired count gets high score
+                break
+            end
+        end
+        
+        -- Also prefer server with low ping (if available)
+        local pingScore = 0
+        if server.ping then
+            pingScore = 100 - math.min(server.ping, 100) -- Lower ping = higher score
+        end
+        
+        local totalScore = playerScore + (pingScore / 10) -- Ping less important than player count
+        
+        if totalScore > bestScore then
+            bestScore = totalScore
+            bestServer = server
+        end
+    end
+    
+    -- If no optimal server found, choose a random one
+    if not bestServer then
+        bestServer = servers[math.random(1, #servers)]
+    end
+    
+    return bestServer.id
+end
+
+-- Server hopping - ONLY HOP BEFORE SELLING
+spawn(function()
+    while true do
+        local currentTime = os.time()
+        local timeElapsed = currentTime - lastHopTime
+        
+        -- Check if it's time to hop server
+        if timeElapsed >= CONSTANTS.HOP_SERVER_TIME then
+            print("⏳ Time to hop server...")
+            
+            if getCurrentLocation() == "TRADING_PLAZA" then
+                print("🔄 Preparing to hop server after 60 minutes...")
+                
+                -- DO NOT remove all current listings before hopping
+                print("⚠️ Keeping all current listings when hopping servers")
+                
+                -- Find best server to hop
+                local targetServer = findBestServer()
+                
+                if targetServer then
+                    print("✅ Found new server, hopping...")
+                    task.wait(2) -- Wait a bit to ensure previous operations complete
+                    
+                    -- Try teleport to new server
+                    local success = pcall(function()
+                        TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer)
+                    end)
+                    
+                    if not success then
+                        print("❌ Server hop failed, will try again later...")
+                    end
+                else
+                    print("⚠️ No suitable server found, will try again later...")
+                end
+            end
+            
+            -- Update last hop time
+            lastHopTime = currentTime
+            task.wait(60) -- Wait at least 1 minute before checking again
+        else
+            -- Display time remaining until next hop if debug enabled
+            if getgenv().Config["Debug Mode"] then
+                local remainingTime = CONSTANTS.HOP_SERVER_TIME - timeElapsed
+                local minutes = math.floor(remainingTime / 60)
+                local seconds = remainingTime % 60
+                
+                if minutes % 10 == 0 and seconds < 10 then -- Only display every 10 minutes
+                    print(string.format("🕒 Time remaining until next server hop: %02d:%02d", minutes, seconds))
+                end
+            end
+            
+            task.wait(60) -- Check every minute
+        end
+    end
+end)
+
+-- Teleport and booth claiming logic (improved)
+spawn(function()
+    while task.wait(5) do
+        local currentLocation = getCurrentLocation()
+        print("Current location: " .. currentLocation)
+        
+        -- If not in Trading Plaza, teleport there
+        if currentLocation ~= "TRADING_PLAZA" then
+            print("Not in Trading Plaza, teleporting...")
+            teleportToTradingPlaza()
+        else
+            -- Wait for character to load
+            if not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) then
+                task.wait(1)
+                continue
+            end
+            
+            -- Claim booth
+            if not currentBooth then
+                print("Attempting to claim booth...")
+                occupyBooth()
+            end
+        end
+    end
+end)
+
+-- Send gems
+spawn(function()
+    while task.wait(30) do
+        local targetUser = getgenv().Config["Account Hold Gem"]
+        -- Only send if configured
+        if targetUser and targetUser ~= "" then
+            sendGems()
+        else
+            -- Notify once
+            print("Skipped sending gems due to no configuration")
+            break -- Exit loop if not configured
+        end
+    end
+end)
+
+-- Add periodic statistics
+spawn(function()
+    while true do
+        task.wait(60) -- Display statistics once per minute
+        
+        print("===== SCRIPT STATISTICS =====")
+        print("⏱️ Runtime: " .. getElapsedTimeString())
+        print("🐾 Total Huge pets in inventory: " .. totalhuge)
+        print("📋 Huge pets listed: " .. hugesSold)
+        print("🧩 Normal items listed: " .. normalItemsSold)
+        print("🎮 Slots used: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+        print("============================")
+        
+        -- Special notice about no-deletion configuration
+        print("⚠️ NOTE: Script is configured to NOT delete listings")
+        print("👉 When slots are full, script will wait until slots become available")
+        print("👉 When hopping servers, listed pets will be kept")
+    end
+end)
+
+-- Main loop - Create listings (completely revamped)
+spawn(function()
+    while true do
+        task.wait(10)
+        
+        if getCurrentLocation() ~= "TRADING_PLAZA" then
+            print("Not in Trading Plaza, waiting...")
+            task.wait(5)
+            continue
+        end
+        
+        -- Check if there's a booth
+        if not currentBooth then
+            print("Booth not found, searching...")
+            occupyBooth()
+            if not currentBooth then
+                print("Booth not found, trying again...")
+                task.wait(5)
+                continue
+            end
+        end
+        
+        -- Update used slots count with improved counting
+        usedSlots = countUsedBoothSlots()
+        print("Currently using: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " booth slots")
+        
+        -- CRITICAL FIX: Reset booth tracking if we're stuck at exactly 20 slots for too long
+        if usedSlots == 20 and os.time() - listingStartTime > 120 then
+            print("⚠️ Detected 20/25 slot issue - forcing a booth tracking reset")
+            resetBoothItemTracking()
+            task.wait(5)
+            usedSlots = countUsedBoothSlots() -- Recount after reset
+        end
+        
+        -- Create listing only if we have less than MAX_BOOTH_SLOTS
+        if usedSlots < MAX_BOOTH_SLOTS then
+            print("Adding items to fill remaining " .. (MAX_BOOTH_SLOTS - usedSlots) .. " booth slots")
+            
+            -- Create item list to list
+            local BoothQueue = {}
+
+            -- Add all Huge pets to the queue, clear classification
+            print("Scanning for Huge pets...")
+            local normalHuges = {}
+            local otherHuges = {}
+
+            for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+                if string.find(PetData.id, "Huge") and not listedItems[PetId] then
+                    -- Try to calculate RAP, if error still add with default RAP
+                    local rap = 0
+                    pcall(function()
+                        rap = GetRap("Pet", PetData)
+                    end)
+                    
+                    if rap <= 0 then rap = 10000000 end -- 10M if cannot calculate
+                    
+                    local typeString = getHugeType(PetData.id, PetData)
+                    local hugeInfo = {
+                        UUID = PetId,
+                        Item = PetData,
+                        Class = "Pet",
+                        Rap = rap,
+                        Type = "Huge",
+                        HugeType = typeString
+                    }
+                    
+                    -- Classify normal and special Huge pets
+                    if typeString == "All Huges Normal" then
+                        table.insert(normalHuges, hugeInfo)
+                        print("Found normal Huge: " .. PetData.id .. " (RAP: " .. rap .. ")")
+                    else
+                        table.insert(otherHuges, hugeInfo)
+                        print("Found special Huge: " .. PetData.id .. " (" .. typeString .. ", RAP: " .. rap .. ")")
+                    end
+                end
+            end
+
+            -- Sort normal Huge pets by RAP
+            if getgenv().Config["Prioritize Low RAP"] then
+                table.sort(normalHuges, function(a, b) return a.Rap < b.Rap end)
+                print("Sorted normal Huge pets by ascending RAP")
+            else
+                table.sort(normalHuges, function(a, b) return a.Rap > b.Rap end)
+                print("Sorted normal Huge pets by descending RAP")
+            end
+
+            -- Sort special Huge pets by RAP
+            if getgenv().Config["Prioritize Low RAP"] then
+                table.sort(otherHuges, function(a, b) return a.Rap < b.Rap end)
+                print("Sorted special Huge pets by ascending RAP")
+            else
+                table.sort(otherHuges, function(a, b) return a.Rap > b.Rap end)
+                print("Sorted special Huge pets by descending RAP")
+            end
+
+            -- Add all normal Huge pets to queue first
+            for _, hugeInfo in ipairs(normalHuges) do
+                table.insert(BoothQueue, hugeInfo)
+            end
+
+            -- Then add all special Huge pets
+            for _, hugeInfo in ipairs(otherHuges) do
+                table.insert(BoothQueue, hugeInfo)
+            end
+
+            print("Sorted " .. #normalHuges .. " normal and " .. #otherHuges .. " special Huge pets for sale")
+
+            -- Add normal items to queue (only when few Huge pets)
+            if #BoothQueue < 5 then
+                for Class, Items in pairs(Savemod.Get().Inventory) do
+                    if Class == "Pet" then continue end -- Handle pets separately
+                    
+                    for ItemId, ItemData in pairs(Items) do
+                        local amount = ItemData._am or 1
+                        if getgenv().item[ItemData.id] and not listedItems[ItemId] and amount > 0 then
+                            local rap = 0
+                            pcall(function() 
+                                rap = GetRap(Class, ItemData) 
+                            end)
+                            
+                            if rap <= 0 then rap = 100000 end -- 100k if cannot calculate
+                            
+                            table.insert(BoothQueue, {
+                                UUID = ItemId,
+                                Item = ItemData,
+                                Class = Class,
+                                Rap = rap,
+                                Type = "Normal"
+                            })
+                        end
+                    end
+                end
+            end
+            
+            -- If no Huge pets found, check all other pets
+            if #BoothQueue == 0 then
+                print("No Huge pets found, checking all other pets...")
+                for PetId, PetData in pairs(Savemod.Get().Inventory.Pet) do
+                    if not listedItems[PetId] and not string.find(PetData.id, "Huge") then
+                        -- Calculate RAP if possible, otherwise use default
+                        local rap = 0
+                        pcall(function()
+                            rap = GetRap("Pet", PetData)
+                        end)
+                        
+                        if rap > 0 then
+                            table.insert(BoothQueue, {
+                                UUID = PetId,
+                                Item = PetData,
+                                Class = "Pet",
+                                Rap = rap,
+                                Type = "Normal Pet"
+                            })
+                        end
+                    end
+                end
+            end
+            
+            -- CRITICAL FIX: Calculate remaining slots directly
+            local remainingSlots = MAX_BOOTH_SLOTS - usedSlots
+            print("Can add up to " .. remainingSlots .. " items to booth")
+            
+            -- Limit number of items that will be added
+            local itemsToAdd = math.min(remainingSlots, #BoothQueue)
+            if itemsToAdd == 0 then
+                print("No new items to add to booth")
+                task.wait(60) -- Wait 1 minute before checking again
+                continue
+            end
+            
+            print("Adding " .. itemsToAdd .. " items to booth...")
+            
+            -- CRITICAL FIX: Use a shorter wait time to avoid rate limiting but allow more listings
+            local waitTimeBetweenListings = 0.5
+            
+            -- Create listings in priority order, only until slots are full
+            local itemsAdded = 0
+            for i = 1, itemsToAdd do
+                local ItemInfo = BoothQueue[i]
+                
+                -- CRITICAL FIX: Continue adding until we reach MAX_BOOTH_SLOTS
+                if usedSlots >= MAX_BOOTH_SLOTS then
+                    print("Used all " .. MAX_BOOTH_SLOTS .. " booth slots")
+                    break
+                end
+                
+                local success = false
+                if ItemInfo.Type == "Huge" then
+                    success = createHugeListing(ItemInfo.UUID, ItemInfo.Item)
+                else
+                    success = createItemListing(ItemInfo.UUID, ItemInfo.Item.id, ItemInfo.Class, ItemInfo.Item._am or 1, ItemInfo.Rap)
+                end
+                
+                if success then
+                    itemsAdded = itemsAdded + 1
+                    print("Added item " .. itemsAdded .. "/" .. itemsToAdd .. " - Current slots: " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS)
+                end
+                
+                task.wait(waitTimeBetweenListings)
+            end
+            
+            -- CRITICAL FIX: Add extra messaging about filling all slots
+            print("✅ Added " .. itemsAdded .. " items to booth - now using " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slots")
+            
+            -- If we still haven't filled all 25 slots after adding items, print a warning
+            if usedSlots < MAX_BOOTH_SLOTS then
+                print("⚠️ WARNING: Only filled " .. usedSlots .. "/" .. MAX_BOOTH_SLOTS .. " slots")
+                
+                -- Force a check for more items if we're at exactly 20 slots (common issue)
+                if usedSlots == 20 then
+                    print("🔄 Detected 20/25 slot issue, will try again to fill remaining slots")
+                    task.wait(5) -- Wait briefly then continue loop to add more
+                else
+                    task.wait(30) -- Otherwise wait longer before checking again
+                end
+            else
+                print("✅ Successfully filled all " .. MAX_BOOTH_SLOTS .. " booth slots!")
+                task.wait(60) -- Wait longer if we're at max slots
+            end
+        else
+            print("Using all " .. MAX_BOOTH_SLOTS .. " booth slots, waiting until slots become available")
+            task.wait(30) -- Wait 30 seconds before checking again
+        end
+    end
+end)
+
+-- Print startup location information
+print("Location at startup: " .. getCurrentLocation())
+print("Script successfully started with Trading Plaza icon: " .. TRADING_PLAZA_ICON)
+print("Configured to prioritize selling Huge pets by " .. (getgenv().Config["Prioritize Low RAP"] and "ascending" or "descending") .. " RAP")
