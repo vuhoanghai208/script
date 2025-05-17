@@ -1,0 +1,510 @@
+getgenv().Config = {
+    ["Webhook URL"] = "",
+    ["User ID"] = "",
+    ["Report Interval"] = 5,
+    ["Debug Mode"] = true,
+    ["Gui"] = true,
+}
+
+-- Initialize services
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+-- Initialize libraries
+local Library = ReplicatedStorage.Library
+local Client = Library.Client
+local SaveLib = require(Client.Save)
+local Directory = require(Library.Directory.Pets)
+local RAPCmds = require(Client.RAPCmds)
+
+-- Constants
+local MINUTE = 60
+local HOUR = 3600
+
+-- Variables for tracking
+local startTime = os.time()
+local lastReportTime = os.time()
+local initialGems = 0
+local currentGems = 0
+local initialHuges = 0
+local currentHuges = 0
+local initialRAP = 0
+local currentRAP = 0
+local initialEggs = 0
+local currentEggs = 0
+local lastSaveTime = 0
+
+-- GUI tracking variables
+local guiVisible = true
+local guiCreated = false
+local gui = nil
+
+-- Format numbers with suffixes
+local function formatNumber(num)
+    if not num then return "0" end
+    
+    local absNum = math.abs(num)
+    local sign = num >= 0 and "" or "-"
+    
+    if absNum >= 1e12 then return sign .. string.format("%.2ft", absNum/1e12)
+    elseif absNum >= 1e9 then return sign .. string.format("%.2fb", absNum/1e9)
+    elseif absNum >= 1e6 then return sign .. string.format("%.2fm", absNum/1e6)
+    elseif absNum >= 1e3 then return sign .. string.format("%.2fk", absNum/1e3)
+    else return tostring(num) end
+end
+
+-- Get current gem count
+local function getGemCount()
+    local gems = 0
+    
+    -- Try using leaderstats first (most reliable)
+    pcall(function()
+        if LocalPlayer and LocalPlayer:FindFirstChild("leaderstats") then
+            local diamonds = LocalPlayer.leaderstats:FindFirstChild("💎 Diamonds")
+            if diamonds and diamonds.Value then
+                gems = diamonds.Value
+            end
+        end
+    end)
+    
+    -- If leaderstats failed, try save data
+    if gems <= 0 then
+        pcall(function()
+            local save = SaveLib.Get()
+            if save and save.Inventory and save.Inventory.Currency then
+                for _, currency in pairs(save.Inventory.Currency) do
+                    if currency.id == "Diamonds" then
+                        gems = currency._am or 0
+                        break
+                    end
+                end
+            end
+        end)
+    end
+    
+    return gems
+end
+
+-- Count Huge pets in inventory
+local function countHugePets()
+    local count = 0
+    
+    pcall(function()
+        local save = SaveLib.Get()
+        if save and save.Inventory and save.Inventory.Pet then
+            for _, pet in pairs(save.Inventory.Pet) do
+                if pet.id and string.find(tostring(pet.id), "Huge") then
+                    count = count + 1
+                end
+            end
+        end
+    end)
+    
+    return count
+end
+
+-- Helper function to get RAP for a single pet
+local function getPetRAP(petId, petData)
+    local rap = 0
+    
+    pcall(function()
+        -- Try to use the RAPCmds
+        rap = RAPCmds.Get({
+            Class = { Name = "Pet" },
+            IsA = function(InputClass) return InputClass == "Pet" end,
+            GetId = function() return petId end,
+            StackKey = function()
+                return HttpService:JSONEncode({
+                    id = petId, 
+                    sh = petData.sh or false, 
+                    pt = petData.pt or 0, 
+                    tn = petData.tn or nil
+                })
+            end
+        }) or 0
+        
+        -- If RAP is 0, estimate based on pet type
+        if rap <= 0 then
+            if string.find(tostring(petId), "Huge") then
+                rap = 10000000 -- Base value for Huge pets
+                
+                -- Adjustments for rarity
+                if petData.sh then rap = rap * 1.5 end -- Shiny
+                if petData.pt == 1 then rap = rap * 1.3 end -- Golden
+                if petData.pt == 2 then rap = rap * 1.6 end -- Rainbow
+            else
+                local rarity = Directory[petId] and Directory[petId].rarity or 1
+                rap = rarity * 1000 -- Base value
+                
+                -- Adjustments for rarity
+                if petData.sh then rap = rap * 3 end
+                if petData.pt == 1 then rap = rap * 2 end
+                if petData.pt == 2 then rap = rap * 4 end
+            end
+        end
+    end)
+    
+    return rap
+end
+
+-- Calculate total RAP of all pets
+local function calculateTotalRAP()
+    local totalRAP = 0
+    
+    pcall(function()
+        local save = SaveLib.Get()
+        if save and save.Inventory and save.Inventory.Pet then
+            for petId, petData in pairs(save.Inventory.Pet) do
+                local petRAP = getPetRAP(petData.id, petData)
+                totalRAP = totalRAP + petRAP
+            end
+        end
+    end)
+    
+    return totalRAP
+end
+
+-- Get hatched eggs count
+local function getHatchedEggs()
+    local eggs = 0
+    
+    pcall(function()
+        local save = SaveLib.Get()
+        if save and save.Stats and save.Stats.EggsOpened then
+            eggs = save.Stats.EggsOpened
+        end
+    end)
+    
+    return eggs
+end
+
+-- Update tracking data
+local function updateTracking()
+    -- Get current values
+    currentGems = getGemCount()
+    currentHuges = countHugePets()
+    currentRAP = calculateTotalRAP()
+    
+    -- Set initial values if not set yet
+    if initialGems == 0 then initialGems = currentGems end
+    if initialHuges == 0 then initialHuges = currentHuges end
+    if initialRAP == 0 then initialRAP = currentRAP end
+    
+    -- Record in history for rate calculation
+    if os.time() - lastSaveTime >= MINUTE then
+        lastSaveTime = os.time()
+    end
+end
+
+-- Send webhook report
+local function sendWebhookReport(isInitial)
+    if getgenv().Config["Webhook URL"] == "" then return end
+    
+    -- Calculate elapsed time
+    local elapsedSeconds = os.time() - startTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    local timeString = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+    
+    -- Format the timestamp
+    local timestamp = os.date("%H:%M %d/%m/%y")
+    
+    -- Get username
+    local username = ""
+    pcall(function()
+        username = LocalPlayer.Name
+    end)
+    
+    -- Calculate stats
+    local gemsGained = currentGems - initialGems
+    local hugesGained = currentHuges - initialHuges
+    
+    -- Create message content
+    local reportInterval = getgenv().Config["Report Interval"]
+    local reportTitle = string.format("||%s|| | %d Minute Stats | Farming for %s", 
+        username, reportInterval, timeString)
+    
+    local gemLine = string.format("💎 Gems: %s (+%s)", 
+        formatNumber(currentGems), formatNumber(gemsGained))
+    
+    local hugeLine = string.format("🐾 Huge: %s (+%s)",
+        currentHuges, hugesGained)
+    
+    -- Create full message
+    local message = string.format("%s\n%s | %s\n\n%s", 
+        reportTitle, gemLine, hugeLine, timestamp)
+    
+    -- Format the webhook payload
+    local payload = {
+        content = getgenv().Config["User ID"] ~= "" and "<@" .. getgenv().Config["User ID"] .. ">" or "",
+        embeds = {
+            {
+                title = reportTitle,
+                description = string.format("%s\n%s\n\n%s", 
+                    gemLine, hugeLine, timestamp),
+                color = 3447003, -- Blue color
+                timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+            }
+        }
+    }
+    
+    -- Send webhook
+    task.spawn(function()
+        pcall(function()
+            request({
+                Url = getgenv().Config["Webhook URL"],
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+    end)
+    
+    -- Print output to console
+    print("====== FARM STATS REPORT ======")
+    print("Account: " .. username)
+    print("Time Elapsed: " .. timeString)
+    print(gemLine)
+    print(hugeLine)
+    print("==============================")
+end
+
+-- Toggle GUI visibility
+local function toggleGUI()
+    if not guiCreated or not gui or not gui.screenGui then return end
+    
+    guiVisible = not guiVisible
+    gui.screenGui.Enabled = guiVisible
+    
+    print("Farm Tracker GUI is now " .. (guiVisible and "visible" or "hidden"))
+    print("Webhook reporting " .. (getgenv().Config["Webhook URL"] ~= "" and "continues to run in the background" or "is disabled (no webhook URL)"))
+end
+
+-- Setup chat commands
+local function setupCommands()
+    -- You can customize these commands
+    local prefix = "!" -- Command prefix
+    local showCommand = "showtracker"
+    local hideCommand = "hidetracker"
+    
+    -- Listen for chat commands
+    LocalPlayer.Chatted:Connect(function(message)
+        message = message:lower()
+        
+        if message == prefix .. showCommand then
+            if not guiVisible then
+                toggleGUI()
+            end
+        elseif message == prefix .. hideCommand then
+            if guiVisible then
+                toggleGUI()
+            end
+        end
+    end)
+    
+    print("Farm Tracker Commands:")
+    print("- " .. prefix .. showCommand .. ": Show the tracker GUI")
+    print("- " .. prefix .. hideCommand .. ": Hide the tracker GUI (webhook still works)")
+end
+
+-- Create visual GUI with time in corner
+local function createTrackingGUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "FarmingTrackerGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = game.Players.LocalPlayer:WaitForChild("PlayerGui")
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 150, 0, 95) -- Reduced height
+    mainFrame.Position = UDim2.new(0, 20, 0, 100)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = mainFrame
+    
+    -- Add Account name display
+    local accountLabel = Instance.new("TextLabel")
+    accountLabel.Name = "AccountLabel"
+    accountLabel.Size = UDim2.new(0.5, -5, 0, 20)
+    accountLabel.Position = UDim2.new(0, 5, 0, 5)
+    accountLabel.BackgroundTransparency = 1
+    accountLabel.Font = Enum.Font.GothamBold
+    accountLabel.TextSize = 14
+    accountLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    -- Try to get player name
+    pcall(function()
+        accountLabel.Text = "😀 " .. LocalPlayer.Name
+    end)
+    accountLabel.TextXAlignment = Enum.TextXAlignment.Left
+    accountLabel.Parent = mainFrame
+    
+    -- Time counter in the top right
+    local timeLabel = Instance.new("TextLabel")
+    timeLabel.Name = "TimeLabel"
+    timeLabel.Size = UDim2.new(0.5, -5, 0, 20)
+    timeLabel.Position = UDim2.new(0.5, 0, 0, 5)
+    timeLabel.BackgroundTransparency = 1
+    timeLabel.Font = Enum.Font.GothamSemibold
+    timeLabel.TextSize = 12
+    timeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    timeLabel.Text = "00:00:00"
+    timeLabel.TextXAlignment = Enum.TextXAlignment.Right
+    timeLabel.Parent = mainFrame
+    
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -10, 0, 20)
+    titleLabel.Position = UDim2.new(0, 5, 0, 25)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 14
+    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleLabel.Text = "Farm Tracker"
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Center
+    titleLabel.Parent = mainFrame
+    
+    local gemLabel = Instance.new("TextLabel")
+    gemLabel.Name = "GemLabel"
+    gemLabel.Size = UDim2.new(1, -10, 0, 20)
+    gemLabel.Position = UDim2.new(0, 5, 0, 45)
+    gemLabel.BackgroundTransparency = 1
+    gemLabel.Font = Enum.Font.Gotham
+    gemLabel.TextSize = 14
+    gemLabel.TextColor3 = Color3.fromRGB(85, 255, 255)
+    gemLabel.Text = "💎 Gems: 0 (+0)"
+    gemLabel.TextXAlignment = Enum.TextXAlignment.Left
+    gemLabel.Parent = mainFrame
+    
+    local hugeLabel = Instance.new("TextLabel")
+    hugeLabel.Name = "HugeLabel"
+    hugeLabel.Size = UDim2.new(1, -10, 0, 20)
+    hugeLabel.Position = UDim2.new(0, 5, 0, 65)
+    hugeLabel.BackgroundTransparency = 1
+    hugeLabel.Font = Enum.Font.Gotham
+    hugeLabel.TextSize = 14
+    hugeLabel.TextColor3 = Color3.fromRGB(255, 170, 0)
+    hugeLabel.Text = "🐾 Huge: 0 (+0)"
+    hugeLabel.TextXAlignment = Enum.TextXAlignment.Left
+    hugeLabel.Parent = mainFrame
+    
+    -- Make GUI draggable
+    local isDragging = false
+    local dragInput
+    local dragStart
+    local startPos
+    
+    local function updateDrag(input)
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+    
+    mainFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            isDragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
+            
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    isDragging = false
+                end
+            end)
+        end
+    end)
+    
+    mainFrame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if input == dragInput and isDragging then
+            updateDrag(input)
+        end
+    end)
+    
+    return {
+        gemLabel = gemLabel,
+        hugeLabel = hugeLabel,
+        timeLabel = timeLabel,
+        screenGui = screenGui
+    }
+end
+
+-- Update GUI function
+local function updateGUI()
+    if not guiCreated or not gui or not guiVisible then return end
+    
+    local elapsedSeconds = os.time() - startTime
+    local hours = math.floor(elapsedSeconds / 3600)
+    local minutes = math.floor((elapsedSeconds % 3600) / 60)
+    local seconds = elapsedSeconds % 60
+    local timeString = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+    
+    -- Calculate gains
+    local gemsGained = currentGems - initialGems
+    local hugesGained = currentHuges - initialHuges
+    
+    -- Update labels with pcall to prevent errors
+    pcall(function()
+        gui.gemLabel.Text = string.format("💎 Gems: %s (+%s)", formatNumber(currentGems), formatNumber(gemsGained))
+        gui.hugeLabel.Text = string.format("🐾 Huge: %s (+%s)", currentHuges, hugesGained)
+        gui.timeLabel.Text = timeString
+    end)
+end
+
+-- Main loop
+local function startTracking()
+    -- Initial values
+    updateTracking()
+    initialGems = currentGems
+    initialHuges = currentHuges
+    initialRAP = currentRAP
+    initialEggs = currentEggs
+    
+    -- Create the GUI
+    gui = createTrackingGUI()
+    guiCreated = true
+    
+    -- Set initial GUI visibility based on config
+    guiVisible = getgenv().Config["Gui"]
+    if gui and gui.screenGui then
+        gui.screenGui.Enabled = guiVisible
+    end
+    
+    -- Setup chat commands
+    setupCommands()
+    
+    -- Send initial report
+    sendWebhookReport(true)
+    
+    -- Register update function
+    RunService.Heartbeat:Connect(function()
+        updateTracking()
+        
+        -- Only update GUI if visible
+        if guiVisible then
+            updateGUI()
+        end
+        
+        -- Check if it's time to send report
+        local reportInterval = math.max(5, getgenv().Config["Report Interval"]) * MINUTE
+        if os.time() - lastReportTime >= reportInterval then
+            sendWebhookReport(false)
+            lastReportTime = os.time()
+        end
+    end)
+end
+
+-- Start tracking after brief delay
+task.wait(3)
+startTracking()
