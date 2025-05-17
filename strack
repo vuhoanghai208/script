@@ -1,11 +1,3 @@
-getgenv().Config = {
-    ["Webhook URL"] = "",
-    ["User ID"] = "",
-    ["Report Interval"] = 5,
-    ["Debug Mode"] = true,
-    ["Gui"] = true,
-}
-
 -- Initialize services
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
