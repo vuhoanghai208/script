@@ -1,0 +1,811 @@
+getgenv().Config = {
+    ["Link Webhook"] = "https://discord.com/api/webhooks/1321351496754925689/Yg48GjwP2EIL99m5THiG5Hpm3by3wVDPpzbQ0zLOw3cpTZoUJiMEBzesN-YpCI-dq4z0", -- Để trống vì lý do bảo mật, người dùng cần tự nhập
+    ["Webhook ID"] = "992368296374571018",
+    ["Hop server"] = 60,
+    ["Prioritize Low RAP"] = true,
+    ["Debug Mode"] = false,
+    ["Randomize Price"] = true,
+    ["Random Range"] = 0.5,
+    ["Enable Webhook Notifications"] = true,
+    ["Max Retries"] = 3,
+    ["Request Cooldown"] = 1,
+    ["Error Log"] = true
+}
+
+-- Kiểm tra configuration
+local function validateConfig()
+    if Config["Enable Webhook Notifications"] and Config["Link Webhook"] == "" then
+        warn("⚠️ Webhook URL chưa được cấu hình! Vui lòng thêm webhook URL vào Config.")
+        Config["Enable Webhook Notifications"] = false
+    end
+    return true
+end
+
+-- Selling strategies
+getgenv().hugemode = {
+    ["All Huges Normal"] = { strategy = "-3%", sell = true },
+    ["All Huges Golden"] = { strategy = "-2%", sell = true },
+    ["All Huges Rainbow"] = { strategy = "-3%", sell = true },
+    ["All Huges Shiny"] = { strategy = "-4%", sell = true }
+}
+
+-- Item configurations
+getgenv().item = { ["Hype Egg 2"] = 95 }
+
+-- Kiểm tra game đã load
+if not game:IsLoaded() then 
+    game.Loaded:Wait() 
+end
+
+-- Services và Modules
+local Services = {
+    VirtualUser = game:GetService("VirtualUser"),
+    Players = game:GetService("Players"),
+    ReplicatedStorage = game:GetService("ReplicatedStorage"),
+    TeleportService = game:GetService("TeleportService"),
+    HttpService = game:GetService("HttpService"),
+    RunService = game:GetService("RunService")
+}
+
+local LocalPlayer = Services.Players.LocalPlayer
+local Library = Services.ReplicatedStorage:WaitForChild("Library")
+local Client = Library:WaitForChild("Client")
+
+-- Safe require với error handling
+local function safeRequire(module)
+    local success, result = pcall(require, module)
+    if success then
+        return result
+    else
+        warn("Failed to require module:", module.Name, result)
+        return nil
+    end
+end
+
+local Modules = {
+    RAPCmds = safeRequire(Client:WaitForChild("RAPCmds")),
+    Network = safeRequire(Client:WaitForChild("Network")),
+    Save = safeRequire(Client:WaitForChild("Save")),
+    ExistCountCmds = safeRequire(Client:WaitForChild("ExistCountCmds"))
+}
+
+-- Kiểm tra modules quan trọng
+if not Modules.Network or not Modules.Save then
+    error("Critical modules failed to load!")
+end
+
+-- Constants
+local Constants = {
+    PLACE_IDS = {
+        MAIN_WORLD = 8737899170,
+        TRADING_PLAZA_1 = 15588442388,
+        TRADING_PLAZA_2 = 15502339080
+    },
+    MAX_BOOTH_SLOTS = 25,
+    DEFAULT_RAP_HUGE = 10000000,
+    DEFAULT_RAP_NORMAL = 100000,
+    HOP_SERVER_TIME = 60 * 60,
+    ANTI_AFK_INTERVAL = 60,
+    WEBHOOK_TIMEOUT = 10,
+    STUCK_THRESHOLD = 20
+}
+
+-- State Management
+local State = {
+    isRunning = true,
+    currentBooth = nil,
+    usedSlots = 0,
+    listedItems = {},
+    lastHopTime = os.time(),
+    lastRequestTime = 0,
+    stuckAt20SlotsTime = 0,
+    stats = {
+        hugesSold = 0,
+        normalItemsSold = 0,
+        totalRevenue = 0,
+        startTime = os.time()
+    }
+}
+
+-- Validate configuration on start
+validateConfig()
+
+-- Anti-AFK System
+local function setupAntiAFK()
+    for _, connection in pairs(getconnections(LocalPlayer.Idled)) do 
+        connection:Disable() 
+    end
+    
+    task.spawn(function()
+        while State.isRunning do
+            task.wait(Constants.ANTI_AFK_INTERVAL)
+            pcall(function() 
+                Services.VirtualUser:ClickButton2(Vector2.new(500, 500)) 
+            end)
+        end
+    end)
+end
+
+-- GUI Creation
+local function createCounterGUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "HugeCounterGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Size = UDim2.new(0, 220, 0, 85)
+    mainFrame.Position = UDim2.new(0, 20, 0, 20)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    local labels = {}
+    local labelData = {
+        {text = "Huge: 0", color = Color3.fromRGB(255, 255, 255)},
+        {text = "Gems: 0", color = Color3.fromRGB(85, 255, 255)},
+        {text = "Sold: 0", color = Color3.fromRGB(85, 255, 85)}
+    }
+    
+    for i, data in ipairs(labelData) do
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, -20, 0, 25)
+        label.Position = UDim2.new(0, 10, 0, 5 + (i-1) * 25)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamBold
+        label.TextSize = 14
+        label.TextColor3 = data.color
+        label.Text = data.text
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.Parent = mainFrame
+        labels[i] = label
+    end
+    
+    return labels[1], labels[2], labels[3]
+end
+
+-- Number formatting
+local function formatNumber(num)
+    if type(num) ~= "number" then return "0" end
+    
+    local suffixes = {"", "K", "M", "B", "T", "Qd", "Qn"}
+    local tier = math.floor(math.log10(math.abs(num)) / 3)
+    
+    if tier <= 0 then
+        return tostring(math.floor(num))
+    elseif tier > #suffixes - 1 then
+        tier = #suffixes - 1
+    end
+    
+    local scaled = num / (1000 ^ tier)
+    return string.format("%.1f%s", scaled, suffixes[tier + 1])
+end
+
+-- Webhook System với rate limiting và retry
+local WebhookManager = {
+    queue = {},
+    processing = false,
+    
+    send = function(self, data)
+        table.insert(self.queue, data)
+        if not self.processing then
+            self:processQueue()
+        end
+    end,
+    
+    processQueue = function(self)
+        if #self.queue == 0 or not Config["Enable Webhook Notifications"] then
+            self.processing = false
+            return
+        end
+        
+        self.processing = true
+        local data = table.remove(self.queue, 1)
+        
+        task.spawn(function()
+            local success = self:sendWebhook(data)
+            if not success then
+                -- Retry logic
+                data.retries = (data.retries or 0) + 1
+                if data.retries < Config["Max Retries"] then
+                    table.insert(self.queue, data)
+                end
+            end
+            
+            task.wait(Config["Request Cooldown"])
+            self:processQueue()
+        end)
+    end,
+    
+    sendWebhook = function(self, data)
+        if Config["Link Webhook"] == "" then return false end
+        
+        local success, result = pcall(function()
+            local Body = Services.HttpService:JSONEncode({
+                content = data.content or "",
+                embeds = data.embeds or {}
+            })
+            
+            local response = request({
+                Url = Config["Link Webhook"],
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = Body,
+                Timeout = Constants.WEBHOOK_TIMEOUT
+            })
+            
+            return response and response.StatusCode == 200
+        end)
+        
+        if not success and Config["Error Log"] then
+            warn("❌ Webhook error:", result)
+        end
+        
+        return success
+    end
+}
+
+-- Asset helper functions
+local function getAssetId(itemId, petType)
+    local success, asset = pcall(function()
+        return require(Library.Directory.Pets)[itemId]
+    end)
+    
+    if success and asset then
+        local thumbnail = petType == 1 and asset.goldenThumbnail or asset.thumbnail
+        return string.gsub(thumbnail or "14976456685", "rbxassetid://", "")
+    end
+    
+    return "14976456685"
+end
+
+-- Get stats với caching
+local StatsCache = {
+    cache = {},
+    
+    get = function(self, cmdModule, class, itemData)
+        local cacheKey = string.format("%s_%s_%s_%s", 
+            itemData.id, itemData.pt or 0, tostring(itemData.sh), tostring(itemData.tn))
+        
+        if self.cache[cacheKey] and os.time() - self.cache[cacheKey].time < 300 then
+            return self.cache[cacheKey].value
+        end
+        
+        local success, result = pcall(function()
+            return cmdModule.Get({
+                Class = { Name = class },
+                IsA = function(inputClass) return inputClass == class end,
+                GetId = function() return itemData.id end,
+                StackKey = function()
+                    return Services.HttpService:JSONEncode({
+                        id = itemData.id,
+                        sh = itemData.sh,
+                        pt = itemData.pt,
+                        tn = itemData.tn
+                    })
+                end
+            })
+        end)
+        
+        if success then
+            self.cache[cacheKey] = {
+                value = result,
+                time = os.time()
+            }
+            return result
+        end
+        
+        return nil
+    end
+}
+
+-- Send sale notification
+local function sendSaleNotification(itemId, itemClass, price, itemData, isHuge)
+    local embedData = {
+        title = string.format("||%s|| Successfully sold %s%s%s for %s gems",
+            LocalPlayer.Name,
+            itemData.pt == 1 and "Golden " or itemData.pt == 2 and "Rainbow " or "",
+            itemData.sh and "Shiny " or "",
+            itemId,
+            formatNumber(price)
+        ),
+        description = isHuge and "🔴 HUGE PET" or "🔵 ITEM",
+        color = isHuge and 16711680 or 255,
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        thumbnail = {
+            url = string.format("https://biggamesapi.io/image/%s", 
+                getAssetId(itemId, itemData.pt))
+        },
+        fields = {},
+        footer = {
+            text = string.format("Auto Seller | %s", os.date("%d/%m/%Y %H:%M:%S"))
+        }
+    }
+    
+    -- Add sale information field
+    local rap = StatsCache:get(Modules.RAPCmds, itemClass, itemData)
+    local exist = StatsCache:get(Modules.ExistCountCmds, itemClass, itemData)
+    
+    table.insert(embedData.fields, {
+        name = "💰 Sale Information",
+        value = string.format(
+            "🏷️ **Type**: `%s`\n💎 **Price**: `%s gems`\n💠 **RAP**: `%s`\n💫 **Exist**: `%s`",
+            itemClass,
+            formatNumber(price),
+            formatNumber(rap or 0),
+            formatNumber(exist or 0)
+        )
+    })
+    
+    -- Add account information field
+    local hugeCount = 0
+    local currentGems = 0
+    
+    pcall(function()
+        -- Count huge pets
+        for _, pet in pairs(Modules.Save.Get().Inventory.Pet) do
+            if string.find(tostring(pet.id), "Huge") then
+                hugeCount = hugeCount + 1
+            end
+        end
+        
+        -- Get current gems
+        local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+        if leaderstats then
+            local diamonds = leaderstats:FindFirstChild("💎 Diamonds")
+            if diamonds then
+                currentGems = diamonds.Value
+            end
+        end
+    end)
+    
+    table.insert(embedData.fields, {
+        name = "📊 Account Information",
+        value = string.format(
+            "🐾 **Huge Pets Remaining**: `%s`\n💰 **Current Gems**: `%s`\n📈 **Total Sold**: `%s`",
+            hugeCount,
+            formatNumber(currentGems),
+            State.stats.hugesSold + State.stats.normalItemsSold
+        )
+    })
+    
+    -- Update stats
+    State.stats.totalRevenue = State.stats.totalRevenue + price
+    if isHuge then
+        State.stats.hugesSold = State.stats.hugesSold + 1
+    else
+        State.stats.normalItemsSold = State.stats.normalItemsSold + 1
+    end
+    
+    -- Send webhook
+    WebhookManager:send({
+        content = Config["Webhook ID"] ~= "" and string.format("<@%s>", Config["Webhook ID"]) or "",
+        embeds = { embedData }
+    })
+end
+
+-- Trading Plaza functions
+local function getCurrentLocation()
+    local placeId = game.PlaceId
+    if placeId == Constants.PLACE_IDS.TRADING_PLAZA_1 or 
+       placeId == Constants.PLACE_IDS.TRADING_PLAZA_2 then
+        return "TRADING_PLAZA"
+    end
+    return "OTHER"
+end
+
+local function teleportToTradingPlaza()
+    if getCurrentLocation() == "TRADING_PLAZA" then
+        return true
+    end
+    
+    local attempts = 0
+    repeat
+        attempts = attempts + 1
+        pcall(function()
+            Modules.Network.Invoke("Travel to Trading Plaza")
+        end)
+        task.wait(5)
+        
+        if getCurrentLocation() ~= "TRADING_PLAZA" and attempts == 2 then
+            pcall(function()
+                Services.TeleportService:Teleport(Constants.PLACE_IDS.TRADING_PLAZA_1)
+            end)
+            task.wait(5)
+        end
+    until getCurrentLocation() == "TRADING_PLAZA" or attempts >= 3
+    
+    return getCurrentLocation() == "TRADING_PLAZA"
+end
+
+-- Booth management
+local function findOwnedBooth()
+    for _, booth in ipairs(workspace.__THINGS.Booths:GetChildren()) do
+        if booth:IsA("Model") and booth:GetAttribute("Owner") == LocalPlayer.UserId then
+            return booth
+        end
+    end
+    return nil
+end
+
+local function claimNearestBooth()
+    local character = LocalPlayer.Character
+    if not character or not character:FindFirstChild("HumanoidRootPart") then
+        return false
+    end
+    
+    local nearestBooth = nil
+    local nearestDistance = math.huge
+    
+    for _, spawn in pairs(workspace.TradingPlaza.BoothSpawns:GetChildren()) do
+        if spawn and spawn.WorldPivot then
+            local distance = (spawn.WorldPivot.Position - character.HumanoidRootPart.Position).Magnitude
+            if distance < nearestDistance and spawn:GetAttribute("ID") then
+                nearestDistance = distance
+                nearestBooth = spawn
+            end
+        end
+    end
+    
+    if nearestBooth then
+        character.HumanoidRootPart.CFrame = CFrame.new(
+            nearestBooth.WorldPivot.Position + Vector3.new(-5, 5, 0)
+        )
+        task.wait(0.5)
+        
+        local success = pcall(function()
+            return Modules.Network.Invoke("Booths_ClaimBooth", tostring(nearestBooth:GetAttribute("ID")))
+        end)
+        
+        task.wait(1)
+        return success and findOwnedBooth() ~= nil
+    end
+    
+    return false
+end
+
+-- Price calculation với strategy
+local function calculatePrice(petData)
+    local isHuge = string.find(petData.id, "Huge") ~= nil
+    
+    if not isHuge then
+        return Constants.DEFAULT_RAP_NORMAL
+    end
+    
+    -- Determine strategy type
+    local strategyType = "All Huges Normal"
+    if petData.pt == 1 then
+        strategyType = "All Huges Golden"
+    elseif petData.pt == 2 then
+        strategyType = "All Huges Rainbow"
+    elseif petData.sh then
+        strategyType = "All Huges Shiny"
+    end
+    
+    local strategy = hugemode[strategyType]
+    if not strategy or not strategy.sell then
+        return nil
+    end
+    
+    -- Parse strategy percentage
+    local multiplier = 0.97
+    if type(strategy.strategy) == "string" then
+        local sign, percentage = strategy.strategy:match("^([%+%-])([%d%.]+)%%$")
+        if sign and percentage then
+            percentage = tonumber(percentage)
+            multiplier = sign == "+" and (1 + percentage/100) or (1 - percentage/100)
+        end
+    end
+    
+    -- Calculate base price
+    local basePrice = Constants.DEFAULT_RAP_HUGE
+    local price = math.floor(basePrice * multiplier)
+    
+    -- Apply randomization if enabled
+    if Config["Randomize Price"] then
+        local range = Config["Random Range"] / 100
+        local randomFactor = 1 + ((math.random() * 2 - 1) * range)
+        price = math.floor(price * randomFactor)
+    end
+    
+    return price
+end
+
+-- Listing management
+local function createListing(uuid, petData)
+    if State.listedItems[uuid] or State.usedSlots >= Constants.MAX_BOOTH_SLOTS then
+        return false
+    end
+    
+    local price = calculatePrice(petData)
+    if not price then
+        return false
+    end
+    
+    local success, result = pcall(function()
+        return Modules.Network.Invoke("Booths_CreateListing", uuid, price, 1)
+    end)
+    
+    if success and result then
+        State.listedItems[uuid] = {
+            isHuge = string.find(petData.id, "Huge") ~= nil,
+            id = petData.id,
+            class = "Pet",
+            price = price,
+            data = petData,
+            time = os.time()
+        }
+        State.usedSlots = State.usedSlots + 1
+        return true
+    end
+    
+    return false
+end
+
+-- Count booth slots accurately
+local function countBoothSlots()
+    if not State.currentBooth then return 0 end
+    
+    local count = 0
+    pcall(function()
+        local scroll = State.currentBooth.Pets.BoothTop.PetScroll
+        for _, child in pairs(scroll:GetChildren()) do
+            if child:IsA("Frame") and child.Name ~= "Template" and child.Visible then
+                count = count + 1
+            end
+        end
+    end)
+    
+    return math.min(count, Constants.MAX_BOOTH_SLOTS)
+end
+
+-- Fill booth efficiently
+local function fillBooth()
+    if not State.currentBooth or State.usedSlots >= Constants.MAX_BOOTH_SLOTS then
+        return
+    end
+    
+    local inventory = Modules.Save.Get().Inventory.Pet
+    if not inventory then return end
+    
+    -- Prioritize huge pets
+    local pets = {}
+    for uuid, petData in pairs(inventory) do
+        if not State.listedItems[uuid] then
+            table.insert(pets, {
+                uuid = uuid,
+                data = petData,
+                isHuge = string.find(petData.id, "Huge") ~= nil
+            })
+        end
+    end
+    
+    -- Sort by priority (huge pets first)
+    table.sort(pets, function(a, b)
+        if a.isHuge ~= b.isHuge then
+            return a.isHuge
+        end
+        return false
+    end)
+    
+    -- Add pets to booth
+    local addedCount = 0
+    for _, pet in ipairs(pets) do
+        if State.usedSlots >= Constants.MAX_BOOTH_SLOTS then
+            break
+        end
+        
+        if createListing(pet.uuid, pet.data) then
+            addedCount = addedCount + 1
+            if addedCount >= 5 then -- Add max 5 items at once
+                task.wait(0.5)
+                addedCount = 0
+            end
+        end
+    end
+end
+
+-- Sale detection system
+local function setupSaleDetection()
+    local lastBoothItems = {}
+    local lastCheckTime = os.time()
+    
+    task.spawn(function()
+        while State.isRunning do
+            task.wait(1)
+            
+            if getCurrentLocation() ~= "TRADING_PLAZA" or not State.currentBooth then
+                continue
+            end
+            
+            -- Get current booth items
+            local currentItems = {}
+            pcall(function()
+                local scroll = State.currentBooth.Pets.BoothTop.PetScroll
+                for _, child in pairs(scroll:GetChildren()) do
+                    if child:IsA("Frame") and child.Name ~= "Template" and child.Visible then
+                        local uid = child:GetAttribute("ItemUID") or 
+                                   child:GetAttribute("UID") or 
+                                   child.Name
+                        if uid then
+                            currentItems[tostring(uid)] = true
+                        end
+                    end
+                end
+            end)
+            
+            -- Check for sales
+            for uuid, itemInfo in pairs(State.listedItems) do
+                if lastBoothItems[uuid] and not currentItems[uuid] then
+                    -- Item was sold
+                    sendSaleNotification(
+                        itemInfo.id,
+                        itemInfo.class,
+                        itemInfo.price,
+                        itemInfo.data,
+                        itemInfo.isHuge
+                    )
+                    
+                    State.listedItems[uuid] = nil
+                    State.usedSlots = math.max(0, State.usedSlots - 1)
+                    
+                    -- Fill booth after sale
+                    task.spawn(fillBooth)
+                end
+            end
+            
+            -- Update tracking
+            lastBoothItems = currentItems
+            State.usedSlots = countBoothSlots()
+            
+            -- Handle stuck at 20 slots
+            if State.usedSlots == 25 then
+                if State.stuckAt20SlotsTime == 0 then
+                    State.stuckAt20SlotsTime = os.time()
+                elseif os.time() - State.stuckAt20SlotsTime > 30 then
+                    fillBooth()
+                    State.stuckAt25SlotsTime = 0
+                end
+            else
+                State.stuckAt25SlotsTime = 0
+            end
+        end
+    end)
+end
+
+-- Server hop system
+local function serverHop()
+    if os.time() - State.lastHopTime < Constants.HOP_SERVER_TIME then
+        return
+    end
+    
+    State.lastHopTime = os.time()
+    
+    local success, servers = pcall(function()
+        local url = string.format(
+            "https://games.roblox.com/v1/games/%s/servers/Public?sortOrder=Asc&limit=100",
+            game.PlaceId
+        )
+        local response = game:HttpGet(url)
+        return Services.HttpService:JSONDecode(response).data
+    end)
+    
+    if success and servers then
+        local validServers = {}
+        for _, server in ipairs(servers) do
+            if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                table.insert(validServers, server)
+            end
+        end
+        
+        if #validServers > 0 then
+            local targetServer = validServers[math.random(1, #validServers)]
+            pcall(function()
+                Services.TeleportService:TeleportToPlaceInstance(
+                    game.PlaceId,
+                    targetServer.id
+                )
+            end)
+        end
+    end
+end
+
+-- GUI Update Loop
+local hugeLabel, gemsLabel, soldLabel = createCounterGUI()
+
+task.spawn(function()
+    while State.isRunning do
+        task.wait(2)
+        
+        -- Update huge count
+        local hugeCount = 0
+        pcall(function()
+            for _, pet in pairs(Modules.Save.Get().Inventory.Pet) do
+                if string.find(tostring(pet.id), "Huge") then
+                    hugeCount = hugeCount + 1
+                end
+            end
+        end)
+        hugeLabel.Text = "Huge: " .. formatNumber(hugeCount)
+        
+        -- Update gems
+        local gems = 0
+        pcall(function()
+            local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+            if leaderstats then
+                local diamonds = leaderstats:FindFirstChild("💎 Diamonds")
+                if diamonds then
+                    gems = diamonds.Value
+                end
+            end
+        end)
+        gemsLabel.Text = "Gems: " .. formatNumber(gems)
+        
+        -- Update sold count
+        soldLabel.Text = string.format("Sold: %s", 
+            formatNumber(State.stats.hugesSold + State.stats.normalItemsSold))
+    end
+end)
+
+-- Main loops
+task.spawn(function()
+    while State.isRunning do
+        task.wait(5)
+        
+        -- Ensure in trading plaza
+        if getCurrentLocation() ~= "TRADING_PLAZA" then
+            teleportToTradingPlaza()
+        elseif not State.currentBooth then
+            -- Try to find or claim booth
+            State.currentBooth = findOwnedBooth()
+            if not State.currentBooth then
+                claimNearestBooth()
+                State.currentBooth = findOwnedBooth()
+            end
+            
+            if State.currentBooth then
+                -- Reset booth state
+                State.usedSlots = countBoothSlots()
+                State.listedItems = {}
+                fillBooth()
+            end
+        else
+            -- Fill booth if needed
+            if State.usedSlots < Constants.MAX_BOOTH_SLOTS then
+                fillBooth()
+            end
+        end
+    end
+end)
+
+-- Server hop loop
+task.spawn(function()
+    while State.isRunning do
+        task.wait(60)
+        if Config["Hop server"] and Config["Hop server"] > 0 then
+            local hopTime = Config["Hop server"] * 60
+            if os.time() - State.lastHopTime >= hopTime then
+                serverHop()
+            end
+        end
+    end
+end)
+
+-- Initialize systems
+setupAntiAFK()
+setupSaleDetection()
+
+-- Cleanup on exit
+game:BindToClose(function()
+    State.isRunning = false
+    task.wait(1)
+end)
+
+print("✅ Auto Seller v2.0 Started Successfully!")
+print("📊 Debug Mode:", Config["Debug Mode"] and "Enabled" or "Disabled")
+print("🌐 Webhook:", Config["Enable Webhook Notifications"] and "Enabled" or "Disabled")
