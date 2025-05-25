@@ -1,5 +1,3 @@
--- Auto Seller Script v2.0 - Improved Version
--- Configuration với bảo mật tốt hơn
 getgenv().Config = {
     ["Link Webhook"] = "https://discord.com/api/webhooks/1321351496754925689/Yg48GjwP2EIL99m5THiG5Hpm3by3wVDPpzbQ0zLOw3cpTZoUJiMEBzesN-YpCI-dq4z0", -- Để trống vì lý do bảo mật, người dùng cần tự nhập
     ["Webhook ID"] = "992368296374571018",
@@ -25,10 +23,10 @@ end
 
 -- Selling strategies
 getgenv().hugemode = {
-    ["All Huges Normal"] = { strategy = "-6%", sell = true },
-    ["All Huges Golden"] = { strategy = "-6%", sell = true },
-    ["All Huges Rainbow"] = { strategy = "-5%", sell = true },
-    ["All Huges Shiny"] = { strategy = "-7%", sell = true }
+    ["All Huges Normal"] = { strategy = "-3%", sell = true },
+    ["All Huges Golden"] = { strategy = "-2%", sell = true },
+    ["All Huges Rainbow"] = { strategy = "-3%", sell = true },
+    ["All Huges Shiny"] = { strategy = "-4%", sell = true }
 }
 
 -- Item configurations
