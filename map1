@@ -1,0 +1,1108 @@
+--=============================================
+-- ULTIMATE AUTOFARM SCRIPT (Executor Version)
+--=============================================
+-- Paste nguyên đoạn này vào executor (Synapse X, KRNL, Hoopsuite, v.v.)
+-- Hỗ trợ đa Map (Map, Map2, Map3, Map4), Auto‐collect Lootbags/Orbs, Auto‐purchase zones, Auto‐rebirth,
+-- Auto‐tap, TNT animations, Fruit/​Toy auto‐consume, và Auto‐activate Ultimate “Ground Pound” đến zone 999.
+-- Cấu hình mặc định có thể override bằng getgenv().autoWorldConfig trước khi chạy script.
+
+----------------------------------------------
+-- 1) CHỜ GAME LOAD ĐỦ CHỖ
+----------------------------------------------
+print("[AutoLoop] Đang chờ game load…")
+
+repeat
+    task.wait(0.5)
+until game:IsLoaded()
+
+repeat
+    task.wait(0.5)
+until game.PlaceId ~= nil
+
+repeat
+    task.wait(0.5)
+until game.Players.LocalPlayer
+   and game.Players.LocalPlayer.Character
+   and game.Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+-- Chờ các thư mục Map, Map2, Map3 hoặc Map4 xuất hiện
+local mapWaitTime = 0
+repeat
+    task.wait(0.5)
+    mapWaitTime = mapWaitTime + 0.5
+    if mapWaitTime > 30 then
+        warn("[AutoLoop] Timeout waiting for Map/Map2/Map3/Map4")
+        break
+    end
+until workspace:FindFirstChild("Map")
+   or workspace:FindFirstChild("Map2")
+   or workspace:FindFirstChild("Map3")
+   or workspace:FindFirstChild("Map4")
+
+-- Chờ thư mục __THINGS và __DEBRIS (game có thể sử dụng)
+local thingsWaitTime = 0
+repeat
+    task.wait(0.5)
+    thingsWaitTime = thingsWaitTime + 0.5
+    if thingsWaitTime > 30 then
+        warn("[AutoLoop] Timeout waiting for __THINGS/__DEBRIS")
+        break
+    end
+until workspace:FindFirstChild("__THINGS")
+   and workspace:FindFirstChild("__DEBRIS")
+
+print("[AutoLoop] Game đã load hoàn chỉnh.")
+
+----------------------------------------------
+-- 2) KHAI BÁO DỊCH VỤ & BIẾN TOÀN CỤC
+----------------------------------------------
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace         = game:GetService("Workspace")
+local RunService        = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    error("[AutoLoop] Không tìm thấy LocalPlayer. Hãy đảm bảo script chạy bằng executor trên client.")
+end
+
+----------------------------------------------
+-- 3) THIẾT LẬP CẤU HÌNH (OVERRIDE QUA getgenv())
+----------------------------------------------
+getgenv().autoWorldConfig = getgenv().autoWorldConfig or {}
+
+-- Zone phải đạt đến để dừng script (default = 999 để “uccultimate challenge”)
+getgenv().autoWorldConfig.ZONE_TO_REACH = getgenv().autoWorldConfig.ZONE_TO_REACH or 999
+
+-- Nếu bật auto‐rebirth
+getgenv().autoWorldConfig.AUTO_REBIRTH = getgenv().autoWorldConfig.AUTO_REBIRTH or true
+
+-- Delay giữa mỗi lần check & purchase zone (giây)
+getgenv().autoWorldConfig.PURCHASE_CHECK_DELAY = getgenv().autoWorldConfig.PURCHASE_CHECK_DELAY or 1
+
+----------------------------------------------
+-- 4) XÁC ĐỊNH THƯ MỤC MAP
+----------------------------------------------
+local PlaceId = game.PlaceId
+local mapRoot
+
+if PlaceId == 8737899170 then
+    mapRoot = Workspace:FindFirstChild("Map")
+elseif PlaceId == 16498369169 then
+    mapRoot = Workspace:FindFirstChild("Map2")
+else
+    -- Thử tìm Map, Map2, Map3, Map4 bất kỳ
+    mapRoot = Workspace:FindFirstChild("Map")
+           or Workspace:FindFirstChild("Map2")
+           or Workspace:FindFirstChild("Map3")
+           or Workspace:FindFirstChild("Map4")
+end
+
+if not mapRoot then
+    warn("[AutoLoop] Không tìm thấy folder Map/Map2/Map3/Map4 trong Workspace.")
+    return
+end
+
+print("[AutoLoop] ✅ Sử dụng map: " .. mapRoot.Name .. " (PlaceId: " .. PlaceId .. ")")
+
+----------------------------------------------
+-- 5) CÀI ĐẶT MÔI TRƯỜNG (OPTIONAL – TÙY Ý)
+----------------------------------------------
+-- 5.1) Tắt nước, sương mù, v.v. để tăng FPS
+do
+    local Terrain    = Workspace:WaitForChild("Terrain")
+    Terrain.WaterReflectance = 0
+    Terrain.WaterTransparency = 1
+    Terrain.WaterWaveSize = 0
+    Terrain.WaterWaveSpeed = 0
+
+    local Lighting   = game:GetService("Lighting")
+    Lighting.Brightness = 0
+    Lighting.GlobalShadows = false
+    Lighting.FogEnd = 9e100
+    Lighting.FogStart = 0
+    pcall(function() sethiddenproperty(Lighting, "Technology", 2) end)
+    pcall(function() sethiddenproperty(Terrain, "Decoration", false) end)
+
+    local function clearTextures(v)
+        if v:IsA("BasePart") and not v:IsA("MeshPart") then
+            v.Material = Enum.Material.Plastic
+            v.Reflectance = 0
+        elseif v:IsA("Decal") or v:IsA("Texture") then
+            v.Transparency = 1
+        elseif v:IsA("ParticleEmitter") or v:IsA("Trail") then
+            v.Lifetime = NumberRange.new(0)
+        elseif v:IsA("Explosion") then
+            v.BlastPressure = 1
+            v.BlastRadius = 1
+        elseif v:IsA("Fire") or v:IsA("SpotLight") or v:IsA("Smoke") or v:IsA("Sparkles") then
+            v.Enabled = false
+        elseif v:IsA("MeshPart") then
+            v.Material = Enum.Material.Plastic
+            v.Reflectance = 0
+            v.TextureID = 10385902758728957
+        elseif v:IsA("SpecialMesh") then
+            v.TextureId = ""
+        elseif v:IsA("ShirtGraphic") then
+            v.Graphic = ""
+        elseif v:IsA("Shirt") or v:IsA("Pants") then
+            v[v.ClassName .. "Template"] = ""
+        elseif v.Name == "Foilage" and v:IsA("Folder") then
+            v:Destroy()
+        elseif string.find(v.Name, "Tree") or string.find(v.Name, "Water") 
+           or string.find(v.Name, "Bush") or string.find(v.Name, "grass") then
+            task.wait()
+            v:Destroy()
+        end
+    end
+
+    Lighting:ClearAllChildren()
+
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        clearTextures(v)
+    end
+
+    Workspace.DescendantAdded:Connect(function(v)
+        clearTextures(v)
+    end)
+end
+
+-- 5.2) Tạo FakeCharacter để “nằm chờ” khi chết (optional)
+do
+    local RealCharacter = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    RealCharacter.Archivable = true
+
+    local FakeCharacter = RealCharacter:Clone()
+    FakeCharacter.Parent = Workspace
+
+    -- Tạo 1 Part tạm anchor để FakeCharacter “đứng”
+    local AnchorPart = Instance.new("Part", Workspace)
+    AnchorPart.Anchored = true
+    AnchorPart.Size = Vector3.new(200, 1, 200)
+    AnchorPart.CFrame = CFrame.new(
+        Random.new():NextInteger(-9999, 9999),
+        -9999,
+        Random.new():NextInteger(-9999, 9999)
+    )
+    AnchorPart.CanCollide = true
+    FakeCharacter.HumanoidRootPart.CFrame = AnchorPart.CFrame * CFrame.new(0, 5, 0)
+
+    -- Clone và disable mặc định tất cả LocalScripts từ RealCharacter
+    for _, v in ipairs(RealCharacter:GetChildren()) do
+        if v:IsA("LocalScript") then
+            local clone = v:Clone()
+            clone.Disabled = true
+            clone.Parent = FakeCharacter
+        end
+    end
+    -- Giảm độ trong suốt các parts của FakeCharacter
+    for _, v in ipairs(FakeCharacter:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.Transparency = 0.7
+        end
+    end
+
+    -- Khi RealCharacter chết, “hoán đổi” lại để giữ FakeCharacter tồn tại
+    RealCharacter.Humanoid.Died:Connect(function()
+        RealCharacter:Destroy()
+        FakeCharacter:Destroy()
+    end)
+
+    LocalPlayer.CharacterAppearanceLoaded:Connect(function()
+        RealCharacter = LocalPlayer.Character
+        FakeCharacter:Destroy()
+        AnchorPart:Destroy()
+
+        AnchorPart = Instance.new("Part", Workspace)
+        AnchorPart.Anchored = true
+        AnchorPart.Size = Vector3.new(200, 1, 200)
+        AnchorPart.CFrame = CFrame.new(
+            Random.new():NextInteger(-9999, 9999),
+            9999,
+            Random.new():NextInteger(-9999, 9999)
+        )
+        AnchorPart.CanCollide = true
+
+        FakeCharacter = RealCharacter:Clone()
+        FakeCharacter.Parent = Workspace
+        FakeCharacter.HumanoidRootPart.CFrame = AnchorPart.CFrame * CFrame.new(0, 5, 0)
+
+        for _, v in ipairs(RealCharacter:GetChildren()) do
+            if v:IsA("LocalScript") then
+                local clone = v:Clone()
+                clone.Disabled = true
+                clone.Parent = FakeCharacter
+            end
+        end
+        for _, v in ipairs(FakeCharacter:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.Transparency = 0.7
+            end
+        end
+
+        RealCharacter.HumanoidRootPart.CFrame = FakeCharacter.HumanoidRootPart.CFrame
+        FakeCharacter.HumanoidRootPart.CFrame = RealCharacter.HumanoidRootPart.CFrame
+
+        RealCharacter.Humanoid:UnequipTools()
+        LocalPlayer.Character = FakeCharacter
+        Workspace.CurrentCamera.CameraSubject = FakeCharacter.Humanoid
+
+        for _, v in ipairs(FakeCharacter:GetChildren()) do
+            if v:IsA("LocalScript") then
+                v.Disabled = false
+            end
+        end
+    end)
+
+    -- Liên tục giữ FakeCharacter ở trên không gian
+    RunService.RenderStepped:Connect(function()
+        if AnchorPart and AnchorPart.Parent then
+            FakeCharacter.HumanoidRootPart.CFrame = AnchorPart.CFrame * CFrame.new(0, 5, 0)
+        end
+    end)
+
+    print("[AutoLoop] FakeCharacter system ready")
+end
+
+----------------------------------------------
+-- 6) OVERRIDE SPEED (PlayerPet.CalculateSpeedMultiplier)
+----------------------------------------------
+do
+    local playerPetModule = ReplicatedStorage.Library.Client:FindFirstChild("PlayerPet")
+    if playerPetModule then
+        local success, module = pcall(function()
+            return require(playerPetModule)
+        end)
+        if success and module and module.CalculateSpeedMultiplier then
+            module.CalculateSpeedMultiplier = function(...)
+                return 200
+            end
+            print("[AutoLoop] PlayerPet.CalculateSpeedMultiplier đã override lên 200")
+        else
+            warn("[AutoLoop] Không thể override PlayerPet.CalculateSpeedMultiplier")
+        end
+    end
+end
+
+----------------------------------------------
+-- 7) FRUIT AUTO CONSUMER
+----------------------------------------------
+local FruitAutoConsumer = {}
+
+-- Safe require helper
+local function safeRequire(path, name)
+    local ok, mod = pcall(require, path)
+    if not ok then
+        warn("[FruitAuto] Không thể load module " .. name .. ": " .. tostring(mod))
+        return nil
+    end
+    return mod
+end
+
+-- Load fruit modules
+local InventoryCmds = safeRequire(ReplicatedStorage.Library.Client:FindFirstChild("InventoryCmds"), "InventoryCmds")
+local SaveModule    = safeRequire(ReplicatedStorage.Library.Client:FindFirstChild("Save"), "Save")
+local FruitsModule  = safeRequire(ReplicatedStorage.Library.Client:FindFirstChild("FruitCmds"), "FruitCmds")
+
+-- Network remotes (Fruits)
+local consumeRemote, updateRemote
+if ReplicatedStorage:FindFirstChild("Network") then
+    local NetworkFolder = ReplicatedStorage.Network
+    consumeRemote = NetworkFolder:FindFirstChild("Fruits: Consume")
+    updateRemote  = NetworkFolder:FindFirstChild("Fruits: Update")
+end
+
+function FruitAutoConsumer.getCurrentFruitCounts(fruitIds)
+    local counts = {}
+    if FruitsModule and FruitsModule.GetActiveFruits then
+        local ok, activeFruits = pcall(function()
+            return FruitsModule.GetActiveFruits()
+        end)
+        if ok and type(activeFruits) == "table" then
+            for fname, data in pairs(activeFruits) do
+                counts[fname] = #data
+            end
+            return counts
+        end
+    end
+    -- Nếu không có module hỗ trợ, trả về 0 cho tất cả fruitIds
+    if fruitIds then
+        for fname, _ in pairs(fruitIds) do
+            counts[fname] = 0
+        end
+    end
+    return counts
+end
+
+function FruitAutoConsumer.needsConsuming(fruitName, targetAmount, fruitIds)
+    targetAmount = targetAmount or 1
+    local currentCounts = FruitAutoConsumer.getCurrentFruitCounts(fruitIds)
+    local current = currentCounts[fruitName] or 0
+    return current < targetAmount, (targetAmount - current)
+end
+
+function FruitAutoConsumer.smartConsume(fruitName, fruitUID, targetAmount, fruitIds)
+    if not fruitName or not fruitUID then
+        return false
+    end
+    targetAmount = targetAmount or 1
+    local needs, amount = FruitAutoConsumer.needsConsuming(fruitName, targetAmount, fruitIds)
+    if needs and amount > 0 then
+        print("[FruitAuto] Consuming:", fruitName, "Amount:", amount)
+        if FruitsModule and FruitsModule.Consume then
+            local ok = pcall(function()
+                FruitsModule.Consume(fruitUID, amount)
+            end)
+            if ok then return true end
+        end
+        if consumeRemote then
+            local ok = pcall(function()
+                consumeRemote:FireServer(fruitUID, amount)
+            end)
+            if ok then return true end
+        end
+    end
+    return false
+end
+
+function FruitAutoConsumer.manageFruits()
+    if not InventoryCmds or not SaveModule then
+        return false
+    end
+    local container = InventoryCmds.Container and InventoryCmds.Container()
+    if not container or not container._store or not container._store._byUID then
+        return false
+    end
+    local saveData = SaveModule.Get()
+    if not saveData or not saveData.Inventory or not saveData.Inventory.Fruit then
+        return false
+    end
+    local fruitIds = {}
+    local needed = {}
+    for itemId, itemData in pairs(saveData.Inventory.Fruit) do
+        if itemData and itemData.id and itemData.id ~= "Candycane" then
+            local fname = itemData.id
+            fruitIds[fname] = itemId
+            table.insert(needed, fname)
+        end
+    end
+
+    -- Xử lý fruit đã active
+    if FruitsModule and FruitsModule.GetActiveFruits then
+        local ok, activeF = pcall(function()
+            return FruitsModule.GetActiveFruits()
+        end)
+        if ok and type(activeF) == "table" then
+            for fname, data in pairs(activeF) do
+                if #data < 1 and fruitIds[fname] then
+                    if FruitsModule and FruitsModule.Consume then
+                        pcall(function()
+                            FruitsModule.Consume(fruitIds[fname], (1 - #data))
+                        end)
+                    end
+                end
+                for i = #needed, 1, -1 do
+                    if needed[i] == fname then
+                        table.remove(needed, i)
+                        break
+                    end
+                end
+                task.wait(0.1)
+            end
+        end
+    end
+    -- Consume phần còn lại
+    for _, fname in ipairs(needed) do
+        if fruitIds[fname] then
+            FruitAutoConsumer.smartConsume(fname, fruitIds[fname], 1, fruitIds)
+            task.wait(0.1)
+        end
+    end
+    return true
+end
+
+function FruitAutoConsumer.consumeToys()
+    local toyRemotes = {
+        "SqueakyToy_Consume",
+        "ToyBall_Consume",
+        "ToyBone_Consume"
+    }
+    local NetworkFolder = ReplicatedStorage:FindFirstChild("Network")
+    if not NetworkFolder then
+        return false
+    end
+    for _, toyName in ipairs(toyRemotes) do
+        local toyRemote = NetworkFolder:FindFirstChild(toyName)
+        if toyRemote and toyRemote:IsA("RemoteFunction") then
+            pcall(function()
+                toyRemote:InvokeServer()
+            end)
+        end
+        task.wait(0.1)
+    end
+    return true
+end
+
+-- Nhận sự kiện update từ server để auto‐consume fruits theo real-time
+if updateRemote then
+    updateRemote.OnClientEvent:Connect(function(data)
+        if not data then return end
+        task.wait(1)
+        local saveData = SaveModule and SaveModule.Get()
+        if not saveData or not saveData.Inventory or not saveData.Inventory.Fruit then
+            return
+        end
+        local fruitIds = {}
+        for itemId, itemData in pairs(saveData.Inventory.Fruit) do
+            if itemData and itemData.id and itemData.id ~= "Candycane" then
+                fruitIds[itemData.id] = itemId
+            end
+        end
+        for fname, fdata in pairs(data) do
+            if fruitIds[fname] and #fdata < 1 then
+                local amt = 1 - #fdata
+                if FruitsModule and FruitsModule.Consume then
+                    pcall(function()
+                        FruitsModule.Consume(fruitIds[fname], amt)
+                    end)
+                elseif consumeRemote then
+                    pcall(function()
+                        consumeRemote:FireServer(fruitIds[fname], amt)
+                    end)
+                end
+                task.wait(0.1)
+            end
+        end
+    end)
+end
+
+print("[AutoLoop] 🍎 Fruit Auto Consumer integrated")
+
+----------------------------------------------
+-- 8) AUTO TAP SYSTEM
+----------------------------------------------
+local AutoTapSystem = {}
+do
+    local PlayerUtil      = safeRequire(ReplicatedStorage.Library.Player, "PlayerUtil")
+    local InstancingCmds  = safeRequire(ReplicatedStorage.Library.Client.InstancingCmds, "InstancingCmds")
+    local BreakableCmds   = safeRequire(ReplicatedStorage.Library.Client.BreakableCmds, "BreakableCmds")
+    local MapCmdsModule   = safeRequire(ReplicatedStorage.Library.Client.MapCmds, "MapCmds")
+    local SignalModule    = safeRequire(ReplicatedStorage.Library.Signal, "Signal")
+    local NetworkModule   = safeRequire(ReplicatedStorage.Library.Client.Network, "Network")
+    if not PlayerUtil or not BreakableCmds or not MapCmdsModule then
+        warn("[AutoTap] Thiếu module cần thiết, bỏ qua AutoTap.")
+    else
+        local MAX_DIST = 150
+        local TAPS_PER_CYCLE = 10
+
+        RunService.RenderStepped:Connect(function()
+            local pos = PlayerUtil.Optional and PlayerUtil.Optional.Position()
+            if not pos then return end
+
+            local list = {}
+            if InstancingCmds and InstancingCmds.IsInInstance and InstancingCmds.IsInInstance() then
+                for _, b in ipairs(BreakableCmds.AllByInstanceAndClass("Chest") or {}) do
+                    table.insert(list, b)
+                end
+                for _, b in ipairs(BreakableCmds.AllByInstanceAndClass("Normal") or {}) do
+                    table.insert(list, b)
+                end
+            else
+                local zone = MapCmdsModule.GetCurrentZone and MapCmdsModule.GetCurrentZone()
+                if zone then
+                    for _, b in ipairs(BreakableCmds.AllByZoneAndClass(zone, "Chest") or {}) do
+                        table.insert(list, b)
+                    end
+                    for _, b in ipairs(BreakableCmds.AllByZoneAndClass(zone, "Normal") or {}) do
+                        table.insert(list, b)
+                    end
+                end
+            end
+
+            for _, b in ipairs(list) do
+                if b and not b:GetAttribute("ManualDamage")
+                   and not b:GetAttribute("DisableDamage")
+                   and (b:GetPivot().Position - pos).Magnitude <= MAX_DIST then
+
+                    local uid = b:GetAttribute("BreakableUID")
+                    if uid then
+                        for i = 1, TAPS_PER_CYCLE do
+                            pcall(function()
+                                if SignalModule then
+                                    SignalModule.Fire("AutoClicker_Nearby", uid)
+                                end
+                            end)
+                            pcall(function()
+                                if NetworkModule then
+                                    NetworkModule.Invoke("AutoClicker_Nearby", uid)
+                                end
+                            end)
+                        end
+                    end
+                end
+            end
+        end)
+
+        print("[AutoLoop] 🔨 AutoTap system activated")
+    end
+end
+
+----------------------------------------------
+-- 9) TNT SYSTEM
+----------------------------------------------
+local TNTSystem = {}
+do
+    local Assets  = ReplicatedStorage:FindFirstChild("Assets")
+    local Audio   = safeRequire(ReplicatedStorage.Library.Audio, "Audio")
+    local Funcs   = safeRequire(ReplicatedStorage.Library.Functions, "Functions")
+    local Shake   = safeRequire(ReplicatedStorage.Library.Client.Shake, "Shake")
+    local __THINGS = Workspace:FindFirstChild("__THINGS")
+    if not Assets or not Audio or not Funcs or not __THINGS then
+        warn("[TNT] Thiếu tài nguyên cần thiết, bỏ qua TNTSystem.")
+    else
+        local TNT_CONFIG = {
+            TNTHeight    = 20,
+            TNTRaiseTime = 0.55,
+            TNTLowerTime = 0.3,
+            ScaleSize    = 1.5
+        }
+        local NetworkFolder = ReplicatedStorage:FindFirstChild("Network")
+
+        local function Explode(position, shouldShake)
+            if Assets.Particles and Assets.Particles.Items and Assets.Particles.Items.TNT then
+                Funcs.Emit(position, function(p)
+                    Funcs.ScaleParticle(p, 3)
+                end, Assets.Particles.Items.TNT:GetChildren())
+            end
+            if Audio then
+                Audio.Play("rbxassetid://14970351150", position, 1, 1, 250)
+            end
+            if Shake and shouldShake then
+                local shakeData = {
+                    Origin         = position,
+                    RollOffDistance = 50,
+                    MaxDistance     = 125
+                }
+                Shake.Create(0.5, 0.5, 0.3, nil, shakeData, shouldShake)
+            end
+        end
+
+        local function DropTNT(player, useCrate, startPos, endPos, startTime, endTime)
+            local tntModel
+            if useCrate and Assets.Models and Assets.Models.Misc and Assets.Models.Misc.TNTCrate then
+                tntModel = Assets.Models.Misc.TNTCrate:Clone()
+            elseif Assets.Models and Assets.Models.Misc and Assets.Models.Misc.TNT then
+                tntModel = Assets.Models.Misc.TNT:Clone()
+            else
+                warn("[TNT] Không tìm thấy model TNT/TNTCrate.")
+                return
+            end
+
+            local itemsFolder = __THINGS:FindFirstChild("Items")
+            if not itemsFolder then
+                itemsFolder = Instance.new("Folder", __THINGS)
+                itemsFolder.Name = "Items"
+            end
+            tntModel.Parent = itemsFolder
+
+            local raisePos = startPos + Vector3.new(0, TNT_CONFIG.TNTHeight, 0)
+            local raiseEndTime = startTime + TNT_CONFIG.TNTRaiseTime
+
+            if Audio then
+                Audio.Play("rbxassetid://14970351121", tntModel.PrimaryPart, 1, 0.25, 100)
+            end
+
+            -- Raise animation
+            spawn(function()
+                while workspace:GetServerTimeNow() < raiseEndTime do
+                    local prog = math.clamp((workspace:GetServerTimeNow() - startTime) / TNT_CONFIG.TNTRaiseTime, 0, 1)
+                    local curPos = startPos:Lerp(raisePos, prog)
+                    tntModel:PivotTo(CFrame.new(curPos))
+                    task.wait()
+                end
+
+                -- Scale animation
+                if Funcs then
+                    Funcs.Tween(tntModel, { Scale = TNT_CONFIG.ScaleSize }, { TNT_CONFIG.TNTLowerTime, "Quart", "In" })
+                end
+
+                -- Lower animation
+                local lowerEnd = raiseEndTime + TNT_CONFIG.TNTLowerTime
+                while workspace:GetServerTimeNow() < lowerEnd do
+                    local prog2 = math.clamp((workspace:GetServerTimeNow() - raiseEndTime) / TNT_CONFIG.TNTLowerTime, 0, 1)
+                    local curPos2 = raisePos:Lerp(endPos, prog2)
+                    tntModel:PivotTo(CFrame.new(curPos2))
+                    task.wait()
+                end
+
+                -- Explode
+                local shake = (player ~= LocalPlayer)
+                Explode(endPos, shake)
+                tntModel:Destroy()
+            end)
+        end
+
+        -- Kết nối event “TNT_Animate”
+        if NetworkFolder then
+            local tntEvent = NetworkFolder:FindFirstChild("TNT_Animate")
+            if tntEvent and tntEvent:IsA("RemoteEvent") then
+                tntEvent.OnClientEvent:Connect(function(player, useCrate, startPos, endPos, startTime, endTime)
+                    if endTime > workspace:GetServerTimeNow() then
+                        DropTNT(player, useCrate, startPos, endPos, startTime, endTime)
+                    end
+                end)
+            end
+        end
+
+        print("[AutoLoop] 💣 TNT system activated")
+    end
+end
+
+----------------------------------------------
+-- 10) ULTIMATE SYSTEM (GROUND POUND)
+----------------------------------------------
+local UltimateSystem = {}
+do
+    local ULT_NAME = "Ground Pound"
+    local CHECK_INTERVAL = 5
+    local AUTO_EQUIP = true
+    local AUTO_ACTIVATE = true
+
+    local UltimateCmds = safeRequire(ReplicatedStorage.Library.Client:FindFirstChild("UltimateCmds"), "UltimateCmds")
+    local NetworkFolder = ReplicatedStorage:FindFirstChild("Network")
+    local equipRemote, activateRemote
+
+    if NetworkFolder then
+        equipRemote    = NetworkFolder:FindFirstChild("Ultimates: Equip")
+        activateRemote = NetworkFolder:FindFirstChild("Ultimates: Activate")
+    end
+
+    local function isUltimateUnlocked()
+        if not UltimateCmds or not UltimateCmds.UltimatesUnlocked then
+            return false
+        end
+        local ok, unlocked = pcall(function()
+            return UltimateCmds.UltimatesUnlocked()
+        end)
+        return ok and unlocked
+    end
+
+    local function isUltimateCharged()
+        if not UltimateCmds or not UltimateCmds.GetChargePercentage then
+            return false
+        end
+        local ok, pct = pcall(function()
+            return UltimateCmds.GetChargePercentage(ULT_NAME)
+        end)
+        return ok and (pct or 0) >= 1
+    end
+
+    local function isUltimateReadyUI()
+        local gui = LocalPlayer:FindFirstChild("PlayerGui")
+        if not gui then return false end
+        local hud = gui:FindFirstChild("Ultimates HUD")
+        if not hud then return false end
+        local fname = ULT_NAME:gsub(" ", "")
+        local frame = hud:FindFirstChild(fname)
+        if not frame then return false end
+        local rLabel = frame:FindFirstChild("R")
+        return rLabel and rLabel:IsA("TextLabel") and rLabel.Visible
+    end
+
+    local function equipUltimate()
+        if not equipRemote then return false end
+        local ok, res = pcall(function()
+            return equipRemote:InvokeServer(ULT_NAME)
+        end)
+        return ok and res
+    end
+
+    local function activateUltimate()
+        if not activateRemote then return false, "Remote không tồn tại" end
+        if AUTO_EQUIP and not isUltimateUnlocked() then
+            return false, "Ultimate chưa unlock"
+        end
+        if isUltimateUnlocked() and isUltimateCharged() then
+            if AUTO_EQUIP then
+                pcall(equipUltimate)
+                task.wait(0.3)
+            end
+            local ok, res = pcall(function()
+                return activateRemote:InvokeServer(ULT_NAME)
+            end)
+            if ok then
+                print("[Ultimate] ⚡ Activated: " .. ULT_NAME)
+                return true
+            else
+                return false, "Activate thất bại"
+            end
+        end
+        return false, "Ultimate chưa sẵn sàng"
+    end
+
+    local function printUltimateStatus()
+        if not UltimateCmds then
+            print("[Ultimate] Module UltimateCmds không khả dụng")
+            return
+        end
+        local status = {}
+        local ok, unlocked = pcall(function()
+            return UltimateCmds.UltimatesUnlocked()
+        end)
+        status.unlocked = ok and unlocked
+        if not status.unlocked then
+            print("❌ Ultimate chưa unlock (Rebirth 4+)")
+            return
+        end
+        local ok1, lvl = pcall(function()
+            return UltimateCmds.GetLevel(ULT_NAME)
+        end)
+        status.level = ok1 and lvl or 0
+        local ok2, tier = pcall(function()
+            return UltimateCmds.GetTier(ULT_NAME)
+        end)
+        status.tier = ok2 and tier or 0
+        local ok3, pct = pcall(function()
+            return UltimateCmds.GetChargePercentage(ULT_NAME)
+        end)
+        status.charge = ok3 and (pct or 0)
+        print("⚡ ULTIMATE STATUS:")
+        print("  Ultimate: " .. ULT_NAME)
+        print("  Unlocked: " .. tostring(status.unlocked))
+        print("  Level: " .. status.level .. " (Tier " .. status.tier .. ")")
+        print("  Charged: " .. tostring(status.charge >= 1) .. " (" .. math.floor((status.charge or 0) * 100) .. "%)")
+    end
+
+    function UltimateSystem.startAutoUltimate()
+        if not isUltimateUnlocked() then
+            warn("[Ultimate] Ultimates chưa unlock, sẽ retry sau")
+        end
+        -- Kick‐start after 3s
+        spawn(function()
+            task.wait(3)
+            activateUltimate()
+        end)
+        -- Periodic check
+        spawn(function()
+            local counter = 0
+            while unfinished do
+                task.wait(CHECK_INTERVAL)
+                counter = counter + 1
+                if isUltimateUnlocked() then
+                    if isUltimateReadyUI() then
+                        local ok, msg = activateUltimate()
+                        if not ok then
+                            print("[Ultimate] ⏳ " .. msg)
+                        end
+                    elseif isUltimateCharged() then
+                        local ok, msg = activateUltimate()
+                        if not ok then
+                            print("[Ultimate] ⏳ " .. msg)
+                        end
+                    end
+                    if counter >= 6 then
+                        counter = 0
+                        printUltimateStatus()
+                    end
+                else
+                    if counter >= 12 then
+                        counter = 0
+                        print("[Ultimate] ❌ Ultimates locked - Need Rebirth 4+")
+                    end
+                end
+            end
+        end)
+        print("[AutoLoop] ⚡ Auto‐Ultimate hệ thống khởi động: " .. ULT_NAME)
+    end
+end
+
+----------------------------------------------
+-- 11) STATE & HELPER FUNCTIONS
+----------------------------------------------
+local currentZone = nil
+local unfinished  = true
+
+-- Lấy zoneName, zoneNumber (mà player đã unlock cao nhất)
+local function getMaxOwnedZone()
+    local ok, zoneName, zoneData = pcall(function()
+        return require(ReplicatedStorage.Library.Client:WaitForChild("ZoneCmds")).GetMaxOwnedZone()
+    end)
+    if not ok then
+        warn("[AutoLoop] Lỗi GetMaxOwnedZone:", zoneName)
+        return nil, nil
+    end
+    if type(zoneName) ~= "string" or type(zoneData) ~= "table" or type(zoneData.ZoneNumber) ~= "number" then
+        warn("[AutoLoop] GetMaxOwnedZone trả về không hợp lệ:", zoneName, zoneData)
+        return nil, nil
+    end
+    return zoneName, zoneData.ZoneNumber
+end
+
+-- Lấy nextZoneName, nextZoneData (chưa unlock)
+local function getNextZone()
+    local ok, zoneName, zoneData = pcall(function()
+        return require(ReplicatedStorage.Library.Client:WaitForChild("ZoneCmds")).GetNextZone()
+    end)
+    if not ok or type(zoneName) ~= "string" or type(zoneData) ~= "table" or type(zoneData.ZoneNumber) ~= "number" then
+        return nil, nil
+    end
+    return zoneName, zoneData
+end
+
+-- Lấy dữ liệu Rebirth tiếp theo
+local function getRebirthInfo()
+    local ok, rbData = pcall(function()
+        return require(ReplicatedStorage.Library.Client:WaitForChild("RebirthCmds")).GetNextRebirth()
+    end)
+    if ok and rbData and type(rbData.RebirthNumber) == "number" and type(rbData.ZoneNumberRequired) == "number" then
+        return rbData.RebirthNumber, rbData.ZoneNumberRequired
+    end
+    return nil, nil
+end
+
+----------------------------------------------
+-- 12) TELEPORT VỚI SAFETY CHECKS
+----------------------------------------------
+local function teleportToMaxZone()
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        warn("[AutoLoop] Character không sẵn sàng để teleport")
+        return false
+    end
+
+    local zoneName, zoneNumber = getMaxOwnedZone()
+    if not zoneName or not zoneNumber then
+        warn("[AutoLoop] Không thể lấy max owned zone")
+        return false
+    end
+
+    if zoneNumber >= getgenv().autoWorldConfig.ZONE_TO_REACH then
+        print("[AutoLoop] 🏆 Đã đạt zone mục tiêu: " .. zoneNumber .. ", dừng script.")
+        unfinished = false
+        return true
+    end
+
+    if currentZone == zoneName then
+        return true
+    end
+    currentZone = zoneName
+    print("[AutoLoop] Teleporting to zone: " .. zoneName .. " (ZoneNumber=" .. zoneNumber .. ")")
+
+    if not mapRoot then
+        warn("[AutoLoop] mapRoot = nil")
+        return false
+    end
+    local desiredName = tostring(zoneNumber) .. " | " .. zoneName
+    local zoneFolder = mapRoot:FindFirstChild(desiredName)
+    if not zoneFolder then
+        warn("[AutoLoop] Không tìm thấy zoneFolder: " .. desiredName)
+        return false
+    end
+
+    -- Teleport vào PERSISTENT.Teleport
+    local persistent = zoneFolder:FindFirstChild("PERSISTENT")
+    if not persistent then
+        warn("[AutoLoop] Zone không có PERSISTENT: " .. zoneName)
+        return false
+    end
+    local tpPart = persistent:FindFirstChild("Teleport")
+    if not tpPart or not tpPart:IsA("BasePart") then
+        warn("[AutoLoop] Zone không có Teleport part: " .. zoneName)
+        return false
+    end
+
+    local hrp = LocalPlayer.Character.HumanoidRootPart
+    hrp.CFrame = tpPart.CFrame + Vector3.new(0, 10, 0)
+    print("[AutoLoop] Đã teleport vào zone: " .. zoneName)
+    task.wait(0.5)
+
+    -- Chờ INTERACT load (max 30s)
+    local waitTime = 0
+    while not zoneFolder:FindFirstChild("INTERACT") and waitTime < 30 do
+        task.wait(0.5)
+        waitTime = waitTime + 0.5
+    end
+    if not zoneFolder:FindFirstChild("INTERACT") then
+        warn("[AutoLoop] Timeout chờ INTERACT cho zone: " .. zoneName)
+        return false
+    end
+    print("[AutoLoop] INTERACT đã load cho zone: " .. zoneName)
+
+    -- Tìm nearest BREAK_ZONE
+    local interact = zoneFolder:FindFirstChild("INTERACT")
+    local breakZones = interact and interact:FindFirstChild("BREAK_ZONES")
+    if not breakZones then
+        warn("[AutoLoop] Zone không có BREAK_ZONES: " .. zoneName)
+        return true
+    end
+
+    local closestPart = nil
+    local minDist = math.huge
+    local hrpPos = hrp.Position
+
+    for _, part in ipairs(breakZones:GetChildren()) do
+        if part:IsA("BasePart") then
+            local d = (hrpPos - part.Position).Magnitude
+            if d < minDist then
+                minDist = d
+                closestPart = part
+            end
+        end
+    end
+
+    if closestPart then
+        hrp.CFrame = closestPart.CFrame + Vector3.new(0, 10, 0)
+        print("[AutoLoop] Đã teleport vào nearest BREAK_ZONE: " .. closestPart.Name)
+    else
+        warn("[AutoLoop] Không tìm thấy BREAK_ZONE trong zone: " .. zoneName)
+    end
+
+    return true
+end
+
+----------------------------------------------
+-- 13) AUTO‐COLLECT LOOTBAGS & ORBS
+----------------------------------------------
+local function setupAutoCollect()
+    -- Lootbags
+    local lootbagsFolder = Workspace.__THINGS and Workspace.__THINGS:FindFirstChild("Lootbags")
+    if lootbagsFolder then
+        for _, lootbag in ipairs(lootbagsFolder:GetChildren()) do
+            if lootbag and lootbag.Name then
+                pcall(function()
+                    ReplicatedStorage.Network:WaitForChild("Lootbags_Claim"):FireServer({ lootbag.Name })
+                    lootbag:Destroy()
+                end)
+                task.wait(0.05)
+            end
+        end
+        lootbagsFolder.ChildAdded:Connect(function(lootbag)
+            task.wait(0.1)
+            if lootbag and lootbag.Name then
+                pcall(function()
+                    ReplicatedStorage.Network:WaitForChild("Lootbags_Claim"):FireServer({ lootbag.Name })
+                    lootbag:Destroy()
+                end)
+            end
+        end)
+        print("[AutoLoop] Lootbags auto‐collect activated")
+    else
+        warn("[AutoLoop] Không tìm thấy folder __THINGS.Lootbags")
+    end
+
+    -- Orbs
+    local orbsFolder = Workspace.__THINGS and Workspace.__THINGS:FindFirstChild("Orbs")
+    if orbsFolder then
+        orbsFolder.ChildAdded:Connect(function(orb)
+            task.wait(0.1)
+            if orb and tonumber(orb.Name) then
+                pcall(function()
+                    ReplicatedStorage.Network:FindFirstChild("Orbs: Collect"):FireServer({ tonumber(orb.Name) })
+                    orb:Destroy()
+                end)
+            end
+        end)
+        print("[AutoLoop] Orbs auto‐collect activated")
+    else
+        warn("[AutoLoop] Không tìm thấy folder __THINGS.Orbs")
+    end
+
+    -- Initial fruit + toy
+    FruitAutoConsumer.manageFruits()
+    FruitAutoConsumer.consumeToys()
+end
+
+----------------------------------------------
+-- 14) ZONE PURCHASE & AUTO‐REBIRTH LOOP
+----------------------------------------------
+local function startPurchaseLoop()
+    print("[AutoLoop] Bắt đầu dịch vụ mua zone và rebirth…")
+    spawn(function()
+        while unfinished do
+            local nextZoneName, nextZoneData = getNextZone()
+            if nextZoneName and nextZoneData then
+                local success, res = pcall(function()
+                    return ReplicatedStorage.Network:WaitForChild("Zones_RequestPurchase"):InvokeServer(nextZoneName)
+                end)
+                if success and res == true then
+                    print("[AutoLoop] ✅ Mua thành công zone: " .. nextZoneName .. " (Zone #" .. nextZoneData.ZoneNumber .. ")")
+                    if getgenv().autoWorldConfig.AUTO_REBIRTH then
+                        local rbNum, rbZone = getRebirthInfo()
+                        if rbNum and rbZone and nextZoneData.ZoneNumber >= rbZone then
+                            print("[AutoLoop] 🔄 Thực hiện Rebirth #" .. rbNum)
+                            local rbOk = pcall(function()
+                                ReplicatedStorage.Network:WaitForChild("Rebirth_Request"):InvokeServer(tostring(rbNum))
+                            end)
+                            if rbOk then
+                                print("[AutoLoop] ✅ Rebirth thành công!")
+                                task.wait(5)
+                            else
+                                warn("[AutoLoop] ❌ Rebirth thất bại")
+                            end
+                        end
+                    end
+                    task.wait(1)
+                    teleportToMaxZone()
+                elseif not success then
+                    warn("[AutoLoop] Lỗi khi mua zone:", res)
+                end
+            end
+            task.wait(getgenv().autoWorldConfig.PURCHASE_CHECK_DELAY or 1)
+        end
+        print("[AutoLoop] ✅ Dịch vụ mua zone đã dừng - Đạt mục tiêu!")
+    end)
+end
+
+----------------------------------------------
+-- 15) MAIN EXECUTION
+----------------------------------------------
+print("[AutoLoop] 🚀 Khởi động Ultimate AutoFarm...")
+
+-- 15.1) Cài đặt auto‐collect
+setupAutoCollect()
+
+-- 15.2) Bắt đầu vòng lặp mua zone + rebirth
+startPurchaseLoop()
+
+-- 15.3) Gọi teleport lần đầu để khởi chạy auto‐farm
+print("[AutoLoop] Chạy teleportToMaxZone() lần đầu...")
+local initOK = teleportToMaxZone()
+if initOK then
+    print("[AutoLoop] ✅ AutoFarm Activated! Chạy đến zone 999.")
+else
+    warn("[AutoLoop] ❌ Lỗi khởi động AutoFarm")
+end
+
+-- 15.4) Bắt đầu AutoTap, TNT, Ultimate
+spawn(function()
+    task.wait(2)
+    -- AutoTap đã tự kích hoạt ở trên
+    -- TNT đã tự kích hoạt ở trên
+    UltimateSystem.startAutoUltimate()
+end)
+
+-- 15.5) Theo dõi status định kỳ (30s) để update fruit/toy & in progress
+spawn(function()
+    local counter = 0
+    while unfinished do
+        task.wait(30)
+        local zName, zNum = getMaxOwnedZone()
+        if zName and zNum then
+            print("[AutoLoop] 📊 Status: Zone #" .. zNum .. " (" .. zName .. ")")
+        end
+
+        counter = counter + 1
+        if counter >= 10 then
+            counter = 0
+            print("[AutoLoop] 🍎 Chạy quản lý fruit định kỳ...")
+            pcall(function() FruitAutoConsumer.manageFruits() end)
+
+            print("[AutoLoop] 🧸 Chạy quản lý toy định kỳ...")
+            pcall(function() FruitAutoConsumer.consumeToys() end)
+
+            -- Thử activate Ultimate nếu ready
+            if UltimateSystem and UltimateSystem.activateUltimate then
+                pcall(function() UltimateSystem.activateUltimate() end)
+            end
+        end
+    end
+end)
